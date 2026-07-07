@@ -1,0 +1,6 @@
+dist
+coverage
+node_modules
+bun.lock
+# Rust/Tauri-owned; formatted by rustfmt and managed by the Tauri CLI.
+src-tauri

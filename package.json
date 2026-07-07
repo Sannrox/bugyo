@@ -1,0 +1,66 @@
+{
+  "name": "bugyo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A desktop command center for orchestrating many kiro-cli sessions over the Agent Client Protocol (ACP).",
+  "license": "Apache-2.0",
+  "author": "The Bugyo Authors",
+  "homepage": "https://github.com/Sannrox/bugyo#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sannrox/bugyo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Sannrox/bugyo/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "bun": ">=1.1.0",
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "3.14.5",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "2.7.1",
+    "@tauri-apps/plugin-notification": "2.3.3",
+    "@tauri-apps/plugin-opener": "^2",
+    "lucide-react": "1.23.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "zustand": "5.0.14"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@tauri-apps/cli": "^2",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "eslint": "10.6.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "17.7.0",
+    "jsdom": "29.1.1",
+    "prettier": "3.9.4",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "8.63.0",
+    "vite": "^7.0.4",
+    "vitest": "4.1.10"
+  }
+}

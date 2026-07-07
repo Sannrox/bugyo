@@ -1,0 +1,26 @@
+# Rust / Cargo
+target/
+**/target/
+
+# Node / bun
+node_modules/
+dist/
+dist-ssr/
+.vite/
+
+# Editor / OS
+.DS_Store
+*.log
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
+*.local
+
+# Tauri build output
+src-tauri/gen/
+
+# Env / secrets — never commit
+.env
+.env.*
+!.env.example

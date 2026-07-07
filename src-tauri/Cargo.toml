@@ -1,0 +1,52 @@
+[package]
+name = "bugyo"
+version = "0.1.0"
+description = "Bugyo — a command center for kiro-cli sessions"
+authors = ["The Bugyo Authors"]
+edition = "2021"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/Sannrox/bugyo"
+homepage = "https://github.com/Sannrox/bugyo"
+keywords = ["tauri", "acp", "agents", "kiro", "orchestration"]
+categories = ["development-tools"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "bugyo_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "process",
+    "io-util",
+    "sync",
+    "rt-multi-thread",
+    "macros",
+    "time",
+] }
+thiserror = "2"
+chrono = { version = "0.4", features = ["clock"] }
+tauri-plugin-dialog = "2"
+saffron = "0.1.0"
+
+# macOS-only: resolve Bugyo's own NSWindow number (`-[NSWindow windowNumber]`)
+# for window-scoped screenshots. Version pinned to match Tauri's own objc2.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+

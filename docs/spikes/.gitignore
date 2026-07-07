@@ -1,0 +1,3 @@
+# Raw spike capture logs — large, regenerable by re-running the probe scripts.
+# The distilled findings live in ../acp-notes.md.
+*.log
