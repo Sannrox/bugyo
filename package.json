@@ -1,7 +1,7 @@
 {
   "name": "bugyo",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A desktop command center for orchestrating many kiro-cli sessions over the Agent Client Protocol (ACP).",
   "license": "Apache-2.0",
   "author": "The Bugyo Authors",
@@ -36,6 +36,8 @@
     "@tauri-apps/plugin-dialog": "2.7.1",
     "@tauri-apps/plugin-notification": "2.3.3",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "2.3.1",
+    "@tauri-apps/plugin-updater": "2.10.1",
     "lucide-react": "1.23.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

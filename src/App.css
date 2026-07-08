@@ -2259,3 +2259,52 @@ select.chip__input {
 .error-banner__dismiss:hover {
   color: #fff;
 }
+
+/* Update banner: appears only when a newer signed release is available. */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #10233b;
+  border-bottom: 1px solid #2b557a;
+  color: #b4d4ff;
+  font-size: 13px;
+}
+.update-banner__icon {
+  flex: none;
+}
+.update-banner__msg {
+  flex: 1;
+  word-break: break-word;
+}
+.update-banner__action {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #1f4d7a;
+  border: 1px solid #2b6aa8;
+  color: #eaf3ff;
+  border-radius: 5px;
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.update-banner__action:hover {
+  background: #2b6aa8;
+}
+.update-banner__dismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: #b4d4ff;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 2px;
+}
+.update-banner__dismiss:hover {
+  color: #fff;
+}

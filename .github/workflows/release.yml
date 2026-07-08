@@ -106,6 +106,13 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing. When `bundle.createUpdaterArtifacts` is true and
+          # this private key is present, tauri-action signs the bundles and
+          # generates `latest.json` (the manifest the app fetches). The matching
+          # public key is embedded in tauri.conf.json (`plugins.updater.pubkey`).
+          # The password secret may be empty if the key was generated without one.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
           # For workflow_dispatch (no tag) tauri-action falls back to the app version.
