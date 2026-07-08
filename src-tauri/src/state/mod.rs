@@ -121,6 +121,30 @@ pub fn append_queue(home: &Path, name: &str, task: &str) -> Result<usize, StateE
     Ok(read_queue(home, name)?.len())
 }
 
+/// Prepend a task to the head of a worker's queue (retry semantics: it runs
+/// before anything already queued). Returns the new depth. Used when a turn
+/// stalls (inactivity timeout) so the in-flight task is retried rather than
+/// dropped. Mirrors [`append_queue`]'s serde-based escaping and line format.
+pub fn prepend_queue(home: &Path, name: &str, task: &str) -> Result<usize, StateError> {
+    let dir = queue_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    let path = queue_file(home, name);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let head = format!(
+        "{{\"ts\":{},\"task\":{}}}\n",
+        serde_json::to_string(&now_ts())?,
+        serde_json::to_string(task)?
+    );
+    // Keep existing lines verbatim (already valid JSONL) after the new head.
+    let mut content = head;
+    for line in existing.lines().filter(|l| !l.trim().is_empty()) {
+        content.push_str(line);
+        content.push('\n');
+    }
+    std::fs::write(&path, content)?;
+    Ok(read_queue(home, name)?.len())
+}
+
 /// Read the queued task strings for a worker (in order).
 pub fn read_queue(home: &Path, name: &str) -> Result<Vec<String>, StateError> {
     let path = queue_file(home, name);
@@ -288,6 +312,36 @@ mod tests {
         assert_eq!(depth, 1, "task must not be dropped");
         assert_eq!(read_queue(&tmp.0, "w").unwrap(), vec![task.to_string()]);
         assert_eq!(pop_queue(&tmp.0, "w").unwrap(), Some(task.to_string()));
+    }
+
+    #[test]
+    fn queue_prepend_puts_task_at_head() {
+        let tmp = Tmp::new();
+        append_queue(&tmp.0, "w", "two").unwrap();
+        append_queue(&tmp.0, "w", "three").unwrap();
+        // A stalled/re-queued task goes to the head so it is retried first.
+        let depth = prepend_queue(&tmp.0, "w", "one").unwrap();
+        assert_eq!(depth, 3);
+        assert_eq!(
+            read_queue(&tmp.0, "w").unwrap(),
+            vec!["one", "two", "three"]
+        );
+        assert_eq!(pop_queue(&tmp.0, "w").unwrap(), Some("one".into()));
+
+        // Prepending onto an empty queue simply creates it.
+        let tmp2 = Tmp::new();
+        assert_eq!(prepend_queue(&tmp2.0, "w", "solo").unwrap(), 1);
+        assert_eq!(read_queue(&tmp2.0, "w").unwrap(), vec!["solo"]);
+    }
+
+    #[test]
+    fn queue_prepend_preserves_control_characters() {
+        // The re-queue path must escape exactly like append so a task with raw
+        // control characters round-trips instead of being silently dropped.
+        let tmp = Tmp::new();
+        let task = "retry\u{0c}me\u{0}now";
+        prepend_queue(&tmp.0, "w", task).unwrap();
+        assert_eq!(read_queue(&tmp.0, "w").unwrap(), vec![task.to_string()]);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -24,7 +24,12 @@ type Pending = Arc<StdMutex<HashMap<i64, oneshot::Sender<Result<Value, Value>>>>
 type PendingPermissions = Arc<StdMutex<HashMap<String, (Id, String)>>>;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Inactivity budget for a prompt turn. A turn is only abandoned when the agent
+/// produces **no** output — and holds no pending approval — for this long.
+/// Unlike a fixed whole-turn cap, this resets on every inbound message, so a
+/// healthy long-running turn that keeps streaming (or is paused awaiting a
+/// human decision) never times out; only a genuinely stalled agent does.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// A live ACP client connected to one agent process/transport.
 pub struct AcpClient {
@@ -35,6 +40,13 @@ pub struct AcpClient {
     sink: Arc<dyn EventSink>,
     // Keep the child alive for the client's lifetime; killed on drop.
     child: StdMutex<Option<Child>>,
+    /// Bumped by the reader loop on every inbound message from the agent; a
+    /// prompt's inactivity timeout resets whenever this changes (each message
+    /// is proof the agent is alive and working).
+    activity: Arc<AtomicU64>,
+    /// Inactivity budget for prompt turns (see [`INACTIVITY_TIMEOUT`]);
+    /// overridable in tests via [`AcpClient::set_inactivity_timeout`].
+    inactivity: Duration,
 }
 
 impl AcpClient {
@@ -47,6 +59,7 @@ impl AcpClient {
         let (writer_tx, writer_rx) = mpsc::channel::<String>(64);
         let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
         let pending_permissions: PendingPermissions = Arc::new(StdMutex::new(HashMap::new()));
+        let activity = Arc::new(AtomicU64::new(0));
 
         tokio::spawn(writer_loop(writer, writer_rx));
         tokio::spawn(reader_loop(
@@ -55,6 +68,7 @@ impl AcpClient {
             pending_permissions.clone(),
             sink.clone(),
             writer_tx.clone(),
+            activity.clone(),
         ));
 
         Self {
@@ -64,6 +78,8 @@ impl AcpClient {
             next_id: AtomicI64::new(1),
             sink,
             child: StdMutex::new(None),
+            activity,
+            inactivity: INACTIVITY_TIMEOUT,
         }
     }
 
@@ -121,6 +137,77 @@ impl AcpClient {
         }
     }
 
+    /// Await a prompt turn's response using an **inactivity** timeout instead of
+    /// a fixed whole-turn cap. The deadline resets on every inbound agent
+    /// message (via `activity`) and never fires while a tool-call permission for
+    /// this session is awaiting a human decision. A healthy, streaming — or
+    /// human-blocked — turn therefore runs as long as it needs; only an agent
+    /// that goes completely silent for `self.inactivity` yields
+    /// [`AcpError::Timeout`]. On timeout the pending waiter is removed but the
+    /// live client is left intact — the caller re-queues (never drops) the task.
+    async fn request_prompt(
+        &self,
+        req: Value,
+        id: i64,
+        session_id: &str,
+    ) -> Result<Value, AcpError> {
+        let (tx, mut rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .insert(id, tx);
+
+        self.writer_tx
+            .send(req.to_string())
+            .await
+            .map_err(|_| AcpError::TransportClosed)?;
+
+        loop {
+            let before = self.activity.load(Ordering::Acquire);
+            tokio::select! {
+                res = &mut rx => {
+                    return match res {
+                        Err(_) => Err(AcpError::TransportClosed),
+                        Ok(Err(e)) => Err(AcpError::Agent(e.to_string())),
+                        Ok(Ok(v)) => Ok(v),
+                    };
+                }
+                _ = tokio::time::sleep(self.inactivity) => {
+                    // Reset the deadline if the agent produced any output during
+                    // the window, or is legitimately paused on a human approval
+                    // prompt; only a truly silent turn is abandoned.
+                    if self.activity.load(Ordering::Acquire) != before
+                        || self.has_pending_permission(session_id)
+                    {
+                        continue;
+                    }
+                    self.pending
+                        .lock()
+                        .expect("pending mutex poisoned")
+                        .remove(&id);
+                    return Err(AcpError::Timeout);
+                }
+            }
+        }
+    }
+
+    /// Whether a tool-call permission request for `session_id` is still awaiting
+    /// a human decision (so its paused turn must not be treated as stalled).
+    fn has_pending_permission(&self, session_id: &str) -> bool {
+        self.pending_permissions
+            .lock()
+            .expect("pending permissions poisoned")
+            .values()
+            .any(|(_, sid)| sid == session_id)
+    }
+
+    /// Override the prompt inactivity budget. Test-only so unit tests can force
+    /// a stall quickly without waiting the production [`INACTIVITY_TIMEOUT`].
+    #[cfg(test)]
+    fn set_inactivity_timeout(&mut self, d: Duration) {
+        self.inactivity = d;
+    }
+
     /// Perform the `initialize` handshake; returns the agent's result object.
     pub async fn initialize(&self) -> Result<Value, AcpError> {
         let id = self.next_id();
@@ -174,10 +261,10 @@ impl AcpClient {
 
         let id = self.next_id();
         let res = self
-            .request(
+            .request_prompt(
                 protocol::prompt_request_with_images(id, session_id, text, images),
                 id,
-                PROMPT_TIMEOUT,
+                session_id,
             )
             .await;
 
@@ -261,6 +348,7 @@ async fn reader_loop<R>(
     pending_permissions: PendingPermissions,
     sink: Arc<dyn EventSink>,
     writer_tx: mpsc::Sender<String>,
+    activity: Arc<AtomicU64>,
 ) where
     R: AsyncBufRead + Unpin,
 {
@@ -275,8 +363,16 @@ async fn reader_loop<R>(
         if trimmed.is_empty() {
             continue;
         }
-        match protocol::parse_incoming(trimmed) {
-            Ok(Incoming::Response { id, result, error }) => {
+        let incoming = match protocol::parse_incoming(trimmed) {
+            Ok(incoming) => incoming,
+            // Ignore malformed lines; stay resilient to version drift.
+            Err(_) => continue,
+        };
+        // Any well-formed message is proof the agent is alive and working:
+        // reset the inactivity deadline of any in-flight prompt turn.
+        activity.fetch_add(1, Ordering::Release);
+        match incoming {
+            Incoming::Response { id, result, error } => {
                 if let Id::Num(n) = id {
                     if let Some(tx) = pending.lock().expect("pending poisoned").remove(&n) {
                         let outcome = match error {
@@ -287,7 +383,7 @@ async fn reader_loop<R>(
                     }
                 }
             }
-            Ok(Incoming::Request { id, method, params }) => {
+            Incoming::Request { id, method, params } => {
                 handle_agent_request(
                     &id,
                     &method,
@@ -298,10 +394,9 @@ async fn reader_loop<R>(
                 )
                 .await;
             }
-            Ok(Incoming::Notification { method, params }) => {
+            Incoming::Notification { method, params } => {
                 handle_notification(&method, &params, &sink);
             }
-            Err(_) => { /* ignore malformed line, stay resilient to version drift */ }
         }
     }
 
@@ -820,7 +915,8 @@ mod tests {
         client.initialize().await.unwrap();
         client.new_session("/tmp").await.unwrap();
 
-        // Must resolve quickly (not hang until PROMPT_TIMEOUT = 300s).
+        // Must resolve quickly (transport close fails the in-flight prompt
+        // immediately; it must not hang until the inactivity timeout).
         let outcome = tokio::time::timeout(Duration::from_secs(5), client.prompt("sess-1", "hi"))
             .await
             .expect("prompt should return promptly on transport close, not time out");
@@ -902,6 +998,122 @@ mod tests {
         assert!(
             cleared,
             "held permission should be cleared on transport close"
+        );
+    }
+
+    /// A streaming turn that keeps emitting `session/update` chunks well past
+    /// the inactivity window must NOT time out: each chunk resets the deadline.
+    #[tokio::test]
+    async fn inactivity_timeout_resets_on_agent_activity() {
+        let (client_io, peer_io) = tokio::io::duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let (peer_r, peer_w) = tokio::io::split(peer_io);
+
+        // Peer: on prompt, stream 6 chunks spaced 80ms apart (~480ms total,
+        // well beyond the 200ms window) before finally answering the prompt.
+        tokio::spawn(async move {
+            let mut w = peer_w;
+            let mut lines = BufReader::new(peer_r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let v: Value = serde_json::from_str(&line).unwrap();
+                let id = v.get("id").cloned();
+                match v.get("method").and_then(Value::as_str).unwrap_or("") {
+                    "initialize" => {
+                        reply(
+                            &mut w,
+                            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1}}),
+                        )
+                        .await;
+                    }
+                    "session/new" => {
+                        reply(
+                            &mut w,
+                            json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":"sess-1"}}),
+                        )
+                        .await;
+                    }
+                    "session/prompt" => {
+                        for _ in 0..6 {
+                            tokio::time::sleep(Duration::from_millis(80)).await;
+                            reply(&mut w, json!({"jsonrpc":"2.0","method":"session/update","params":{
+                                "sessionId":"sess-1",
+                                "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}
+                            }})).await;
+                        }
+                        reply(
+                            &mut w,
+                            json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                        )
+                        .await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let mut client = AcpClient::new(client_r, client_w, Arc::new(VecSink(events)));
+        client.set_inactivity_timeout(Duration::from_millis(200));
+        client.initialize().await.unwrap();
+        client.new_session("/tmp").await.unwrap();
+
+        let stop = client.prompt("sess-1", "long task").await.unwrap();
+        assert_eq!(
+            stop, "end_turn",
+            "a turn that keeps streaming must not time out even past the window"
+        );
+    }
+
+    /// A turn whose agent goes completely silent (no updates, no response) while
+    /// the transport stays open must time out via the inactivity budget.
+    #[tokio::test]
+    async fn inactivity_timeout_fires_when_agent_goes_silent() {
+        let (client_io, peer_io) = tokio::io::duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let (peer_r, peer_w) = tokio::io::split(peer_io);
+
+        // Peer answers the handshake, then never responds to the prompt but
+        // keeps its transport open (parks on the next read) — modelling a
+        // wedged, silent agent rather than a crashed one.
+        tokio::spawn(async move {
+            let mut w = peer_w;
+            let mut lines = BufReader::new(peer_r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let v: Value = serde_json::from_str(&line).unwrap();
+                let id = v.get("id").cloned();
+                match v.get("method").and_then(Value::as_str).unwrap_or("") {
+                    "initialize" => {
+                        reply(
+                            &mut w,
+                            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1}}),
+                        )
+                        .await;
+                    }
+                    "session/new" => {
+                        reply(
+                            &mut w,
+                            json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":"sess-1"}}),
+                        )
+                        .await;
+                    }
+                    // Deliberately silent on prompt; loop back and park on read.
+                    _ => {}
+                }
+            }
+        });
+
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let mut client = AcpClient::new(client_r, client_w, Arc::new(VecSink(events)));
+        client.set_inactivity_timeout(Duration::from_millis(150));
+        client.initialize().await.unwrap();
+        client.new_session("/tmp").await.unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(3), client.prompt("sess-1", "hi"))
+            .await
+            .expect("a silent turn must resolve via the inactivity timeout");
+        assert!(
+            matches!(outcome, Err(AcpError::Timeout)),
+            "expected Timeout on a silent stalled turn, got {outcome:?}"
         );
     }
 
