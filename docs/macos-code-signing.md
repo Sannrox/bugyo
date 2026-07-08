@@ -37,21 +37,20 @@ it for a build you trust.
 
 ## How the release workflow is wired
 
-`.github/workflows/release.yml` passes these to `tauri-action`:
+`.github/workflows/release.yml` has a **Configure macOS code signing** step that
+runs before `tauri-action` and writes the signing config to `$GITHUB_ENV`:
 
-```yaml
-APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-APPLE_ID: ${{ secrets.APPLE_ID }}
-APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-```
+- If the `APPLE_CERTIFICATE` secret is **absent**, it exports only
+  `APPLE_SIGNING_IDENTITY=-` (ad-hoc). It deliberately does **not** export an
+  empty `APPLE_CERTIFICATE`: Tauri's bundler treats an empty-but-set value as
+  "present" and tries to `security import` it, which fails the build.
+- If the `APPLE_CERTIFICATE` secret is **present**, it exports the full set
+  (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+  `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) so the build is signed with the
+  Developer ID identity and notarized.
 
-While the secrets are unset they resolve to empty, so `tauri-action` skips
-certificate import and notarization, and `APPLE_SIGNING_IDENTITY` falls back to
-`-` (ad-hoc). Add the secrets and the **same** build becomes fully signed and
-notarized — no workflow edits required.
+So the same workflow produces an ad-hoc build today and a fully signed +
+notarized build the moment the secrets are added — no workflow edits required.
 
 ## Turning on Developer ID signing + notarization
 
