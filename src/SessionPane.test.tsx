@@ -122,7 +122,9 @@ describe("SessionPane — capability palette", () => {
     // Select /clear from the palette, then type arguments after it.
     fireEvent.change(box, { target: { value: "/cl" } });
     fireEvent.keyDown(box, { key: "Enter" }); // fills "/clear "
-    fireEvent.change(box, { target: { value: "/clear keep the last message" } });
+    fireEvent.change(box, {
+      target: { value: "/clear keep the last message" },
+    });
 
     // Palette must not be open once the user is typing arguments…
     expect(screen.queryByRole("listbox")).toBeNull();
