@@ -68,13 +68,23 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS code signing / notarization (optional — set as repo secrets).
-          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # macOS code signing / notarization.
+          #
+          # Until the APPLE_* repo secrets are set, these resolve to empty and
+          # tauri-action skips certificate import + notarization, while the
+          # signing identity falls back to "-" (ad-hoc). Ad-hoc signing needs no
+          # Apple account and stops macOS flagging the universal build as
+          # "damaged" on Apple Silicon (users still get the Gatekeeper
+          # "unidentified developer" prompt). The moment a Developer ID cert and
+          # notarization creds are added as secrets, the same build becomes fully
+          # signed + notarized with no further edits — see
+          # docs/macos-code-signing.md.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: .
           # For workflow_dispatch (no tag) tauri-action falls back to the app version.

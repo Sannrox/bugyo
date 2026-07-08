@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for Developer ID signing + notarization.
+
+  NOT wired into tauri.conf.json yet: the 0.1.0 build is ad-hoc signed and does
+  not use these. When enabling real signing, reference this file via
+  `bundle > macOS > entitlements` — see docs/macos-code-signing.md.
+
+  Kept intentionally minimal. `allow-jit` is the one entitlement WKWebView's
+  JavaScript engine typically needs under the hardened runtime; add others only
+  if a specific capability requires it.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+  </dict>
+</plist>

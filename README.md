@@ -38,6 +38,35 @@ bun install
 bun run tauri dev
 ```
 
+## Download
+
+Prebuilt bundles for macOS (universal), Linux (`.AppImage`/`.deb`), and Windows
+(`.msi`/`.exe`) are attached to each [GitHub Release](https://github.com/Sannrox/bugyo/releases).
+
+### macOS: first launch
+
+macOS builds are **ad-hoc signed but not notarized**, so on first launch
+Gatekeeper will warn that the app is from an "unidentified developer." This is
+expected for now. To open it:
+
+1. Download and open the `.dmg`, then drag **Bugyo** to `Applications`.
+2. Launch it once — macOS blocks it and shows the warning.
+3. Open **System Settings → Privacy & Security**, scroll to the message about
+   Bugyo being blocked, and click **Open Anyway**. (On older macOS you can
+   instead right-click the app → **Open**.)
+
+Or, from a terminal, clear the download's quarantine flag and launch normally:
+
+```bash
+xattr -cr /Applications/Bugyo.app     # clears all extended attributes, or:
+xattr -dr com.apple.quarantine /Applications/Bugyo.app   # only the quarantine flag
+```
+
+This is a deliberate Gatekeeper bypass — only do it for a build you trust. You
+only need to do this once. A future release will be Developer ID signed and
+notarized to remove this step — see
+[`docs/macos-code-signing.md`](./docs/macos-code-signing.md).
+
 ## Documentation
 
 - [`VISION.md`](./VISION.md) — what we're building and why
