@@ -41,6 +41,8 @@ thiserror = "2"
 chrono = { version = "0.4", features = ["clock"] }
 tauri-plugin-dialog = "2"
 saffron = "0.1.0"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 # macOS-only: resolve Bugyo's own NSWindow number (`-[NSWindow windowNumber]`)
 # for window-scoped screenshots. Version pinned to match Tauri's own objc2.

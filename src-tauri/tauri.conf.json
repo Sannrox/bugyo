@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "category": "DeveloperTool",
     "copyright": "Copyright © 2026 The Bugyo Authors",
@@ -42,5 +43,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Sannrox/bugyo/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY2NDJFNkRDRDA5RTY3QTMKUldTalo1N1EzT1pDWm1jOTNGdHVyR3pLck9tb1pzQ3JWc0QyZkYyU05uWjF1OHZ2SUxBNysyTk4K"
+    }
   }
 }
