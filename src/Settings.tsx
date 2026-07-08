@@ -1,7 +1,14 @@
 import { Settings as SettingsIcon } from "lucide-react";
+import { useState } from "react";
 import { useSettings, type ToolDisplay } from "./lib/settingsStore";
 import TrustProfiles from "./TrustProfiles";
 import BudgetSettings from "./BudgetSettings";
+import {
+  checkForUpdate,
+  installUpdate,
+  restartApp,
+  type UpdateCheck,
+} from "./lib/update";
 
 const TOOL_OPTIONS: { value: ToolDisplay; label: string; hint: string }[] = [
   { value: "all", label: "All", hint: "Show every tool call" },
@@ -68,6 +75,74 @@ export default function Settings() {
 
       <TrustProfiles />
       <BudgetSettings />
+      <UpdatesSection />
     </section>
+  );
+}
+
+/** Manual update check + in-place install (mirrors the auto banner's flow). */
+function UpdatesSection() {
+  const [state, setState] = useState<
+    "idle" | "checking" | "installing" | "installed"
+  >("idle");
+  const [result, setResult] = useState<UpdateCheck | null>(null);
+
+  const onCheck = async () => {
+    setState("checking");
+    setResult(await checkForUpdate());
+    setState("idle");
+  };
+
+  const onInstall = async () => {
+    if (result?.status !== "available") return;
+    setState("installing");
+    try {
+      await installUpdate(result.update);
+      setState("installed");
+    } catch {
+      setState("idle");
+    }
+  };
+
+  return (
+    <div className="settings__group">
+      <div className="settings__row">
+        <label className="settings__label">
+          <span>Software updates</span>
+          <span className="muted">
+            {state === "checking"
+              ? "Checking for updates…"
+              : state === "installing"
+                ? "Downloading and installing…"
+                : state === "installed"
+                  ? "Update installed — restart to apply."
+                  : result?.status === "available"
+                    ? `Version ${result.info.version} is available.`
+                    : result?.status === "uptodate"
+                      ? "You're on the latest version."
+                      : result?.status === "error"
+                        ? `Check failed: ${result.message}`
+                        : "Check whether a newer signed release is available."}
+          </span>
+        </label>
+        {state === "installed" ? (
+          <button type="button" onClick={() => void restartApp()}>
+            Restart now
+          </button>
+        ) : result?.status === "available" && state === "idle" ? (
+          <button type="button" onClick={() => void onInstall()}>
+            Install {result.info.version}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void onCheck()}
+            disabled={state !== "idle"}
+          >
+            Check for updates
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
