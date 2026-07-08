@@ -72,4 +72,34 @@ describe("ReviewPanel — conflict dry-run", () => {
     fireEvent.click(screen.getByRole("button", { name: /^merge$/i }));
     await waitFor(() => expect(workspaceMerge).toHaveBeenCalledWith("s1"));
   });
+
+  it("aborts the merge (fails closed) if the pre-merge conflict check throws", async () => {
+    // Clean on open so checks/merge become enabled…
+    vi.mocked(workspaceMergePreview).mockResolvedValueOnce({
+      clean: true,
+      conflictedFiles: [],
+    });
+
+    render(<ReviewPanel sessionId="s1" />);
+    openPanel();
+    await screen.findByText(/merges cleanly/i);
+
+    fireEvent.change(screen.getByLabelText("check script"), {
+      target: { value: "true" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /run checks/i }));
+    await screen.findByText(/checks passed/i);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^merge$/i })).toBeEnabled(),
+    );
+
+    // …but the re-check right before merging fails. The merge must not proceed.
+    vi.mocked(workspaceMergePreview).mockRejectedValueOnce(
+      new Error("git failed"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^merge$/i }));
+
+    await screen.findByText(/could not verify merge safety/i);
+    expect(workspaceMerge).not.toHaveBeenCalled();
+  });
 });

@@ -321,6 +321,19 @@ impl AcpManager {
         Ok(())
     }
 
+    /// Put a task back at the **head** of a session's queue (retry semantics),
+    /// under the per-worker queue lock. Used when a turn stalls (inactivity
+    /// timeout) so the in-flight task is retried by a fresh client rather than
+    /// dropped. Returns silently if the session is gone.
+    async fn requeue_front(&self, session_id: &str, task: &str) {
+        let Some(name) = self.worker_name(session_id).await else {
+            return;
+        };
+        let lock = self.queue_lock(&name).await;
+        let _g = lock.lock().await;
+        let _ = state::prepend_queue(&state::orch_home(), &name, task);
+    }
+
     /// The stored app handle, or an error if the app hasn't initialised yet.
     fn app_handle(&self) -> Result<AppHandle, String> {
         self.inner
@@ -768,6 +781,29 @@ impl AcpManager {
             self.persist_spend();
 
             if let Err(err) = result {
+                // A stalled turn (inactivity timeout) is recoverable: the agent
+                // went silent but the task is not its fault, so re-queue it at
+                // the head for a fresh client to retry rather than dropping it.
+                // The drain still stops so `dispatch_one` releases the (possibly
+                // wedged) process; the next heartbeat re-dispatches. Retries are
+                // throttled to heartbeat cadence, so this can't busy-loop.
+                if matches!(err, AcpError::Timeout) {
+                    self.requeue_front(session_id, &current).await;
+                    self.emit_queue(session_id).await;
+                    self.log(&format!(
+                        "dispatch STALLED -> {session_id}: turn timed out, re-queued: {current}"
+                    ))
+                    .await;
+                    self.emit(
+                        ACP_EVENT,
+                        AcpEvent::Error {
+                            message: format!(
+                                "Session {session_id}: turn stalled (no activity) and was re-queued for retry: {current}"
+                            ),
+                        },
+                    );
+                    break;
+                }
                 self.log(&format!(
                     "dispatch FAILED -> {session_id}: {current} ({err})"
                 ))
@@ -897,10 +933,9 @@ impl AcpManager {
         command: String,
         automation_id: Option<String>,
     ) {
-        let worker_name = workspace
-            .as_ref()
-            .map(|w| w.branch.clone())
-            .unwrap_or_else(|| session_id.clone());
+        // Key the worker (its durable queue file + queue lock) by the globally
+        // unique session id, never the branch name — see `worker_key`.
+        let worker_name = worker_key(&session_id);
         let created = state::now_ts();
         let meta = WorkerMeta {
             name: worker_name.clone(),
@@ -966,7 +1001,10 @@ impl AcpManager {
                     client: None,
                     args: s.args,
                     workspace,
-                    worker_name: s.worker_name,
+                    // Re-derive the queue key from the session id rather than
+                    // trusting the persisted `worker_name`, which may be an old
+                    // branch-keyed value from before the collision fix.
+                    worker_name: worker_key(&s.session_id),
                     repo: s.repo,
                     command: s.command,
                     created: s.created,
@@ -995,6 +1033,18 @@ pub struct SessionInfo {
     /// The session's working directory (project path or worktree).
     repo: String,
     queued: usize,
+}
+
+/// The durable queue/worker key for a session.
+///
+/// Keyed by the globally-unique **session id** — deliberately *not* the branch
+/// name. Branch names are only deduped within a single repo (`unique_branch`),
+/// so two workspaces in different repos that pick the same branch (e.g. a "fix
+/// tests" task in two projects) would otherwise collide on the same
+/// `queue/<branch>.jsonl` file and queue lock — cross-contaminating queue
+/// depths and dispatching one repo's queued prompt into the other's session.
+fn worker_key(session_id: &str) -> String {
+    session_id.to_string()
 }
 
 /// Map a per-automation [`config::TrustMode`] to `(trust_all, trust_tools)` for
@@ -1708,6 +1758,38 @@ impl AcpManager {
             },
         );
     }
+
+    /// Insert a cold, already-busy **workspaced** session, deriving its queue
+    /// key exactly as [`AcpManager::insert`] does (`worker_key(session_id)`), so
+    /// a test can assert two sessions sharing a branch across different repos do
+    /// not collide on the same queue.
+    async fn insert_cold_busy_workspaced_for_test(
+        &self,
+        session_id: &str,
+        branch: &str,
+        repo_root: &str,
+    ) {
+        let workspace = Workspace {
+            repo_root: repo_root.to_string(),
+            base_branch: "main".to_string(),
+            branch: branch.to_string(),
+            worktree_path: format!("{repo_root}/wt"),
+        };
+        self.inner.sessions.lock().await.insert(
+            session_id.to_string(),
+            SessionEntry {
+                client: None,
+                args: vec!["acp".to_string()],
+                workspace: Some(workspace),
+                worker_name: worker_key(session_id),
+                repo: repo_root.to_string(),
+                command: "kiro-cli acp".to_string(),
+                created: state::now_ts(),
+                busy: Arc::new(AtomicBool::new(true)),
+                automation_id: None,
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1754,6 +1836,80 @@ mod tests {
             (false, vec!["fs_read".to_string(), "fs_write".to_string()])
         );
         assert!(trust_all_widens());
+    }
+
+    // Fix #1: two sessions sharing a branch name across different repos must
+    // keep independent queues — the durable queue file is keyed by the unique
+    // session id, not the branch. Before the fix both mapped to
+    // `queue/<branch>.jsonl`, cross-contaminating depths and dispatching one
+    // repo's queued prompt into the other's session.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn same_branch_across_repos_do_not_share_a_queue() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        mgr.insert_cold_busy_workspaced_for_test("sess-A", "fix-tests", "/repo/a")
+            .await;
+        mgr.insert_cold_busy_workspaced_for_test("sess-B", "fix-tests", "/repo/b")
+            .await;
+
+        // Both sessions are busy, so enqueue only appends (no dispatch/spawn).
+        mgr.enqueue("sess-A", "task-for-A").await.unwrap();
+        mgr.enqueue("sess-B", "task-for-B").await.unwrap();
+
+        let key_a = mgr.worker_name("sess-A").await.unwrap();
+        let key_b = mgr.worker_name("sess-B").await.unwrap();
+        assert_ne!(
+            key_a, key_b,
+            "queue keys must be per-session, not per-branch"
+        );
+        assert_eq!(
+            state::read_queue(&tmp.0, &key_a).unwrap(),
+            vec!["task-for-A"]
+        );
+        assert_eq!(
+            state::read_queue(&tmp.0, &key_b).unwrap(),
+            vec!["task-for-B"]
+        );
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    // Fix #2: a stalled turn (inactivity timeout) must re-queue its in-flight
+    // task at the head for retry, not silently drop it like a hard failure.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn drain_requeues_task_on_timeout_instead_of_dropping() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        mgr.insert_cold_busy_for_test("sess-1", "sess-1").await;
+        state::append_queue(&tmp.0, "sess-1", "task-2").unwrap();
+
+        // A runner that times out models an agent that stalled mid-turn.
+        mgr.drain_session("sess-1", "task-1".to_string(), |_text| async {
+            Err::<String, _>(AcpError::Timeout)
+        })
+        .await;
+
+        // task-1 is re-queued at the head (retried first); task-2 preserved.
+        assert_eq!(
+            state::read_queue(&tmp.0, "sess-1").unwrap(),
+            vec!["task-1", "task-2"],
+            "a stalled turn must re-queue its task at the head, not drop it"
+        );
+        // busy was cleared so the next dispatch can retry the re-queued task.
+        assert_eq!(
+            mgr.reserve_and_pop("sess-1", true).await,
+            Some("task-1".to_string())
+        );
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
     }
 
     // The env lock is held across awaits to keep KIRO_ORCH_HOME stable; see the

@@ -1,9 +1,10 @@
+import { useMemo } from "react";
 import { diffLines, parseUnifiedDiff } from "./lib/diff";
 import type { ToolDiff } from "./lib/bindings";
 
 /** Render a unified-diff patch as per-file, collapsible, colored diffs. */
 export default function DiffView({ patch }: { patch: string }) {
-  const files = parseUnifiedDiff(patch);
+  const files = useMemo(() => parseUnifiedDiff(patch), [patch]);
   if (files.length === 0) {
     return <p className="muted">(no committed changes vs base)</p>;
   }
@@ -69,7 +70,14 @@ export default function DiffView({ patch }: { patch: string }) {
 /** Compact inline diff for a tool call's file edit (from ACP `content`). */
 export function InlineDiff({ diff }: { diff: ToolDiff }) {
   const created = diff.oldText == null;
-  const lines = diffLines(diff.oldText ?? "", diff.newText);
+  // The LCS diff is O(n·m) (DP table up to 1500×1500). SessionPane re-renders on
+  // every batched store commit — up to once per animation frame while an agent
+  // streams — so recomputing this in the render body would run multi-megabyte
+  // DP passes at ~60fps. Memoize on the diff's contents.
+  const lines = useMemo(
+    () => diffLines(diff.oldText ?? "", diff.newText),
+    [diff.oldText, diff.newText],
+  );
 
   return (
     <details className="diff diff--inline">

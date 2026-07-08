@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { CheckResult, MergePreview } from "./lib/bindings";
 import DiffView from "./DiffView";
 import {
@@ -20,6 +20,9 @@ export default function ReviewPanel({ sessionId }: { sessionId: string }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  // Synchronous guard against a double-click re-entering merge() before the
+  // `busy` state (and thus the disabled button) has re-rendered.
+  const merging = useRef(false);
 
   const checksPassed = check?.success === true;
   const hasConflicts = preview?.clean === false;
@@ -51,24 +54,45 @@ export default function ReviewPanel({ sessionId }: { sessionId: string }) {
   }
 
   async function merge() {
-    if (!checksPassed) return;
-    // Re-check for conflicts right before merging; block if not clean.
-    const p = preview ?? (await refreshPreview());
-    if (p && !p.clean) {
-      setError(
-        `Merge would conflict in: ${p.conflictedFiles.join(", ") || "unknown files"}. Resolve before merging.`,
+    if (!checksPassed || merging.current) return;
+    // Hold the in-flight guard across the *entire* flow — including the
+    // pre-merge conflict check and the confirm dialog — so the Merge button is
+    // disabled the moment merging starts. Previously `busy` was only set inside
+    // the final `run()`, leaving the button clickable during the preview
+    // round-trip and letting a double-click launch two full merge flows.
+    merging.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      // Always re-check for conflicts right before merging, and fail *closed*:
+      // a stale cached preview or a failed conflict check must never let a
+      // merge through into the base branch.
+      const p = await refreshPreview();
+      if (!p) {
+        setError(
+          "Could not verify merge safety — the conflict check failed. Merge aborted.",
+        );
+        return;
+      }
+      if (!p.clean) {
+        setError(
+          `Merge would conflict in: ${p.conflictedFiles.join(", ") || "unknown files"}. Resolve before merging.`,
+        );
+        return;
+      }
+      const ok = await confirmDialog(
+        "Merge this workspace branch into the base branch?",
+        "Merge workspace",
       );
-      return;
+      if (!ok) return;
+      await workspaceMerge(sessionId);
+      setNote("Merged into the base branch.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+      merging.current = false;
     }
-    const ok = await confirmDialog(
-      "Merge this workspace branch into the base branch?",
-      "Merge workspace",
-    );
-    if (!ok) return;
-    await run(
-      () => workspaceMerge(sessionId),
-      () => setNote("Merged into the base branch."),
-    );
   }
 
   return (
