@@ -7,6 +7,7 @@ import {
   automationRemove,
   automationRunNow,
   automationUpdate,
+  confirmDialog,
   onAutomationRun,
 } from "./lib/ipc";
 import type {
@@ -80,6 +81,13 @@ export default function Automations() {
   }
 
   async function remove(id: string) {
+    const a = items.find((x) => x.id === id);
+    const ok = await confirmDialog(
+      `Delete automation "${a?.name ?? id}"? This removes its schedule and ` +
+        "trust configuration and cannot be undone.",
+      "Delete automation",
+    );
+    if (!ok) return;
     try {
       await automationRemove(id);
       setItems((xs) => xs.filter((x) => x.id !== id));

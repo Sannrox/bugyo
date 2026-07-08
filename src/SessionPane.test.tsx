@@ -114,6 +114,31 @@ describe("SessionPane — capability palette", () => {
       expect(orchEnqueue).toHaveBeenCalledWith("s1", "/clear"),
     );
   });
+
+  it("submits a command with arguments via Enter without wiping the args", async () => {
+    render(<SessionPane sessionId="s1" />);
+    const box = promptBox();
+
+    // Select /clear from the palette, then type arguments after it.
+    fireEvent.change(box, { target: { value: "/cl" } });
+    fireEvent.keyDown(box, { key: "Enter" }); // fills "/clear "
+    fireEvent.change(box, { target: { value: "/clear keep the last message" } });
+
+    // Palette must not be open once the user is typing arguments…
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    // …and Enter must submit the full command instead of re-selecting it.
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect((box as HTMLTextAreaElement).value).toBe(""); // input cleared on send
+
+    const { orchEnqueue } = await import("./lib/ipc");
+    await waitFor(() =>
+      expect(orchEnqueue).toHaveBeenCalledWith(
+        "s1",
+        "/clear keep the last message",
+      ),
+    );
+  });
 });
 
 describe("SessionPane — screenshot prompt", () => {

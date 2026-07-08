@@ -204,11 +204,38 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   });
 
   // Auto-scroll to the newest block while pinned to the bottom.
+  //
+  // `blocks.length` alone is not enough: `reduceSession` coalesces consecutive
+  // agentMessage/agentThought chunks into the *same* transcript entry, so a
+  // streaming reply grows the last block's height while the block count stays
+  // constant. Track a signature of the last block's content so the effect also
+  // re-runs (and re-pins) as that block grows.
+  const lastBlockSignature = useMemo(() => {
+    const last = blocks[blocks.length - 1];
+    if (!last) return "";
+    if (last.kind === "toolGroup") {
+      // Cover every tool in the group, not just the last one. A
+      // `tool_call_update` can grow a tool's `output` or attach/grow its
+      // `diff` (an InlineDiff mounts/grows, changing the block's height)
+      // without changing the last tool's `status` — sampling only the tail
+      // would miss that growth and skip the auto-scroll re-pin.
+      const sig = last.tools.reduce(
+        (acc, t) =>
+          `${acc}|${t.status}:${(t.output ?? "").length}:${t.diff?.newText.length ?? 0}`,
+        "",
+      );
+      return `tg:${last.tools.length}:${sig}`;
+    }
+    const e = last.entry;
+    const len = "text" in e ? e.text.length : 0;
+    return `e:${e.kind}:${len}`;
+  }, [blocks]);
+
   useEffect(() => {
     if (stickToBottom.current && blocks.length > 0) {
       virtualizer.scrollToIndex(blocks.length - 1, { align: "end" });
     }
-  }, [blocks.length, virtualizer]);
+  }, [blocks.length, lastBlockSignature, virtualizer]);
 
   useEffect(() => {
     if (state?.pendingPermission) {
@@ -259,6 +286,17 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   // Match against the command name only (text up to the first space), so args
   // typed after the command don't keep re-filtering the list.
   const query = isSlash ? prompt.slice(1).split(/\s/, 1)[0].toLowerCase() : "";
+  // Once the input is a recognized command/prompt name followed by a space, the
+  // user has moved on to typing *arguments*. Stop treating the input as a
+  // palette query — otherwise the palette re-opens on every keystroke and Enter
+  // re-selects the command, wiping the args the user just typed.
+  const knownItemNames = new Set([
+    ...caps.commands.map((c) => c.name.toLowerCase()),
+    ...caps.prompts.map((p) => p.name.toLowerCase()),
+  ]);
+  const isKnownItem =
+    knownItemNames.has(`/${query}`) || knownItemNames.has(query);
+  const typingArgs = isSlash && /\s/.test(prompt) && isKnownItem;
   type PaletteItem = {
     kind: "command" | "prompt";
     name: string;
@@ -290,7 +328,8 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
           })),
       ]
     : [];
-  const paletteOpen = isSlash && !paletteDismissed && paletteItems.length > 0;
+  const paletteOpen =
+    isSlash && !paletteDismissed && !typingArgs && paletteItems.length > 0;
   const paletteActive = Math.max(
     0,
     Math.min(paletteIndex, paletteItems.length - 1),

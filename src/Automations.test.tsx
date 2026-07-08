@@ -29,6 +29,7 @@ vi.mock("./lib/ipc", () => ({
     status: "dispatched",
     message: null,
   })),
+  confirmDialog: vi.fn(async () => true),
   onAutomationRun: vi.fn(async (h: (run: AutomationRun) => void) => {
     onRunHandler = h;
     return () => {};
@@ -141,5 +142,29 @@ describe("Automations panel", () => {
     await waitFor(() =>
       expect(screen.getByText("created")).toBeInTheDocument(),
     );
+  });
+
+  it("deletes an automation only after confirmation", async () => {
+    const { confirmDialog, automationRemove } = await import("./lib/ipc");
+    vi.mocked(confirmDialog).mockResolvedValue(true);
+
+    render(<Automations />);
+    await waitFor(() => screen.getByText("nightly triage"));
+
+    fireEvent.click(screen.getByLabelText("delete nightly triage"));
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalled());
+    await waitFor(() => expect(automationRemove).toHaveBeenCalledWith("a1"));
+  });
+
+  it("does not delete an automation when confirmation is cancelled", async () => {
+    const { confirmDialog, automationRemove } = await import("./lib/ipc");
+    vi.mocked(confirmDialog).mockResolvedValueOnce(false);
+
+    render(<Automations />);
+    await waitFor(() => screen.getByText("nightly triage"));
+
+    fireEvent.click(screen.getByLabelText("delete nightly triage"));
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalled());
+    expect(automationRemove).not.toHaveBeenCalled();
   });
 });

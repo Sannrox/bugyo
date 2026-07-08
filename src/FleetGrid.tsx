@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GitBranch, Pin, SquareTerminal } from "lucide-react";
 import { useFleet } from "./lib/fleetStore";
 import { useBudget } from "./lib/budgetStore";
@@ -158,7 +158,14 @@ export default function FleetGrid() {
   const order = useFleet((s) => s.order);
   const projects = useFleet((s) => s.projects);
   const removeSession = useFleet((s) => s.removeSession);
-  const now = Date.now();
+  // Shared clock for relative "last active" labels — one interval for the whole
+  // grid, so idle cards' ages keep advancing instead of freezing at render time
+  // (mirrors the Sidebar's tick).
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Selection is local to the grid (not global store state).
   const [selected, setSelected] = useState<Set<string>>(new Set());

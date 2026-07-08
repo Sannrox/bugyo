@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ShieldCheck, Trash2 } from "lucide-react";
 import type { TrustProfile } from "./lib/bindings";
 import {
+  confirmDialog,
   messageDialog,
   trustProfileList,
   trustProfileRemove,
@@ -63,6 +64,12 @@ export default function TrustProfiles() {
   }
 
   async function remove(id: string) {
+    const p = profiles.find((x) => x.id === id);
+    const ok = await confirmDialog(
+      `Delete trust profile "${p?.name ?? id}"? This cannot be undone.`,
+      "Delete trust profile",
+    );
+    if (!ok) return;
     try {
       await trustProfileRemove(id);
       await refresh();
