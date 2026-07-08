@@ -55,7 +55,10 @@ export default function UpdateBanner() {
 
   const pct =
     progress && progress.contentLength
-      ? Math.min(100, Math.round((progress.downloaded / progress.contentLength) * 100))
+      ? Math.min(
+          100,
+          Math.round((progress.downloaded / progress.contentLength) * 100),
+        )
       : null;
 
   return (

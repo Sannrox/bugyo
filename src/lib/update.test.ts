@@ -41,11 +41,12 @@ describe("describeUpdate", () => {
   });
 
   it("drops empty/whitespace release notes", () => {
-    expect(describeUpdate({ version: "1", currentVersion: "0", body: "   " }))
-      .toMatchObject({ notes: undefined });
     expect(
-      describeUpdate({ version: "1", currentVersion: "0" }),
+      describeUpdate({ version: "1", currentVersion: "0", body: "   " }),
     ).toMatchObject({ notes: undefined });
+    expect(describeUpdate({ version: "1", currentVersion: "0" })).toMatchObject(
+      { notes: undefined },
+    );
   });
 });
 
@@ -81,14 +82,12 @@ describe("installUpdate", () => {
   it("aggregates download progress across events", async () => {
     const events: number[] = [];
     const update = {
-      downloadAndInstall: vi.fn(
-        async (cb: (e: unknown) => void) => {
-          cb({ event: "Started", data: { contentLength: 100 } });
-          cb({ event: "Progress", data: { chunkLength: 40 } });
-          cb({ event: "Progress", data: { chunkLength: 60 } });
-          cb({ event: "Finished", data: {} });
-        },
-      ),
+      downloadAndInstall: vi.fn(async (cb: (e: unknown) => void) => {
+        cb({ event: "Started", data: { contentLength: 100 } });
+        cb({ event: "Progress", data: { chunkLength: 40 } });
+        cb({ event: "Progress", data: { chunkLength: 60 } });
+        cb({ event: "Finished", data: {} });
+      }),
     };
 
     await installUpdate(update, (p) => events.push(p.downloaded));
