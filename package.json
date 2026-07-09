@@ -1,7 +1,7 @@
 {
   "name": "bugyo",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A desktop command center for orchestrating many kiro-cli sessions over the Agent Client Protocol (ACP).",
   "license": "Apache-2.0",
   "author": "The Bugyo Authors",
