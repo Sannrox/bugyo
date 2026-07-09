@@ -148,6 +148,126 @@ pub fn reclaim_stale_lock(session_id: &str) {
     }
 }
 
+/// Resolve the `kiro-cli` executable to an absolute path.
+///
+/// A GUI app launched from Finder/Dock on macOS (or from a desktop launcher on
+/// Linux) does **not** inherit the user's login-shell `PATH`. launchd hands the
+/// app a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so a bare `kiro-cli`
+/// spawn fails with `NotFound` — "No such file or directory (os error 2)" —
+/// even though the binary is installed and works from a terminal (and thus
+/// under `tauri dev`, which inherits the terminal's environment).
+///
+/// Resolution order (first hit wins):
+/// 1. `BUGYO_KIRO_CLI` env override — an explicit path to the executable.
+/// 2. The current process `PATH` (covers `tauri dev` and any inherited env).
+/// 3. The login shell's `PATH` (recovers the environment a terminal would have:
+///    nix profiles, `~/.local/bin`, Homebrew, custom installs).
+/// 4. A set of common install directories.
+///
+/// Falls back to the bare name `kiro-cli` so the original spawn error still
+/// surfaces if nothing is found. The result is cached for the process lifetime
+/// so the (potentially slow) login-shell probe runs at most once.
+pub fn resolve_kiro_cli() -> &'static str {
+    use std::sync::OnceLock;
+    static RESOLVED: OnceLock<String> = OnceLock::new();
+    RESOLVED.get_or_init(resolve_kiro_cli_uncached).as_str()
+}
+
+fn resolve_kiro_cli_uncached() -> String {
+    const BIN: &str = "kiro-cli";
+
+    // 1. Explicit override.
+    if let Some(p) = std::env::var_os("BUGYO_KIRO_CLI") {
+        let path = std::path::PathBuf::from(&p);
+        if is_executable(&path) {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+
+    // 2. Current process PATH (works under `tauri dev`).
+    if let Some(p) = find_on_path(BIN, std::env::var_os("PATH")) {
+        return p;
+    }
+
+    // 3. Login-shell PATH (a GUI launch does not inherit it).
+    if let Some(path) = login_shell_path() {
+        if let Some(p) = find_on_path(BIN, Some(std::ffi::OsString::from(path))) {
+            return p;
+        }
+    }
+
+    // 4. Common install locations.
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        let candidates = [
+            home.join(".local/bin").join(BIN),
+            std::path::PathBuf::from("/opt/homebrew/bin").join(BIN),
+            std::path::PathBuf::from("/usr/local/bin").join(BIN),
+            std::path::PathBuf::from("/usr/bin").join(BIN),
+        ];
+        for c in candidates {
+            if is_executable(&c) {
+                return c.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    // Last resort: bare name — spawn will surface the NotFound error.
+    BIN.to_string()
+}
+
+/// True if `path` is a regular file with an executable bit set (on Unix). On
+/// non-Unix platforms, existence as a file is sufficient.
+fn is_executable(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Search a `PATH`-style variable for an executable named `bin`, returning the
+/// first matching absolute path.
+fn find_on_path(bin: &str, path: Option<std::ffi::OsString>) -> Option<String> {
+    let path = path?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(bin))
+        .find(|candidate| is_executable(candidate))
+        .map(|candidate| candidate.to_string_lossy().into_owned())
+}
+
+/// Ask the user's login shell for its `PATH`. This is the standard way a
+/// GUI-launched app recovers the environment a terminal would have (it sources
+/// the user's shell profile). Returns `None` if the shell can't be run or
+/// produces no `PATH`.
+fn login_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    // `-l` (login) + `-i` (interactive) so both profile and rc files are
+    // sourced; `printf` avoids a trailing newline and shell-builtin quirks.
+    let output = std::process::Command::new(&shell)
+        .args(["-lic", "printf %s \"$PATH\""])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +295,47 @@ mod tests {
             serde_json::to_value(&ev).unwrap(),
             json!({ "type": "status", "sessionId": "s1", "status": "needsApproval" })
         );
+    }
+
+    #[test]
+    fn find_on_path_locates_executable_across_dirs() {
+        let dir = std::env::temp_dir().join(format!("bugyo-path-{}", std::process::id()));
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join("kiro-cli");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // A PATH with a non-existent dir first, then the real one.
+        let path = std::env::join_paths([dir.join("nope"), bin_dir.clone()]).unwrap();
+        let found = find_on_path("kiro-cli", Some(path));
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        #[cfg(unix)]
+        assert_eq!(found.as_deref(), Some(bin.to_string_lossy().as_ref()));
+        #[cfg(not(unix))]
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn find_on_path_returns_none_for_missing_binary() {
+        let empty = std::env::temp_dir().join("bugyo-empty-does-not-exist");
+        let path = std::env::join_paths([empty]).unwrap();
+        assert!(find_on_path("kiro-cli", Some(path)).is_none());
+        assert!(find_on_path("kiro-cli", None).is_none());
+    }
+
+    #[test]
+    fn is_executable_rejects_missing_and_dirs() {
+        assert!(!is_executable(std::path::Path::new(
+            "/definitely/not/here/kiro-cli"
+        )));
+        // A directory is not an executable file.
+        assert!(!is_executable(&std::env::temp_dir()));
     }
 }

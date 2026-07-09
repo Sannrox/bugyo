@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-09
+
+### Fixed
+
+- **`kiro-cli` not found when launched as a bundled app.** A GUI launch (Finder/
+  Dock on macOS, desktop launcher on Linux) does not inherit the login-shell
+  `PATH`, so spawning the agent by bare name failed with
+  `io: No such file or directory (os error 2)` even though `kiro-cli` was
+  installed and worked under `tauri dev`. The backend now resolves `kiro-cli`
+  to an absolute path — honoring a `BUGYO_KIRO_CLI` override, the process
+  `PATH`, the login shell's `PATH`, and common install directories — and caches
+  the result for the process lifetime.
+
 ## [0.1.0] - 2026-07-08
 
 First public release. An early, pre-1.0 cut — the core orchestration loop works
@@ -39,5 +52,6 @@ end to end, but expect rough edges and no stability guarantees yet.
   one-time "Open Anyway" step. Developer ID signing + notarization can be
   enabled by adding repo secrets; see `docs/macos-code-signing.md`.
 
-[unreleased]: https://github.com/Sannrox/bugyo/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/Sannrox/bugyo/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Sannrox/bugyo/compare/v0.2.0...v0.2.1
 [0.1.0]: https://github.com/Sannrox/bugyo/releases/tag/v0.1.0

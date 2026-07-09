@@ -219,7 +219,8 @@ impl AcpManager {
             spent: self.inner.spent.clone(),
         });
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let client = AcpClient::spawn("kiro-cli", &arg_refs, sink).map_err(|e| e.to_string())?;
+        let program = crate::acp::resolve_kiro_cli();
+        let client = AcpClient::spawn(program, &arg_refs, sink).map_err(|e| e.to_string())?;
         client.initialize().await.map_err(|e| e.to_string())?;
         client
             .load_session(session_id, &cwd)
@@ -1099,7 +1100,8 @@ async fn start_client(
         app: app.clone(),
         spent,
     });
-    let client = AcpClient::spawn("kiro-cli", &arg_refs, sink).map_err(|e| e.to_string())?;
+    let client = AcpClient::spawn(crate::acp::resolve_kiro_cli(), &arg_refs, sink)
+        .map_err(|e| e.to_string())?;
     client.initialize().await.map_err(|e| e.to_string())?;
     let id = client.new_session(cwd).await.map_err(|e| e.to_string())?;
     Ok((Arc::new(client), id))
