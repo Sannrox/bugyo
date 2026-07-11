@@ -175,7 +175,10 @@ export default function VisualReferenceFixture() {
           <SessionPane
             sessionId="visual-primary"
             initialReviewOpen
-            reviewFixture={{ review: REVIEW, diff: stress ? STRESS_DIFF : DIFF }}
+            reviewFixture={{
+              review: REVIEW,
+              diff: stress ? STRESS_DIFF : DIFF,
+            }}
           />
         )}
         <StatusBar />
