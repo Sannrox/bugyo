@@ -856,11 +856,6 @@ code {
   word-break: break-word;
 }
 
-.sidebar__footer {
-  border-top: 1px solid var(--border);
-  padding-top: 0.5rem;
-}
-
 .sidebar__add {
   margin-left: auto;
   background: transparent;
@@ -880,33 +875,6 @@ code {
 .sidebar__noworkspaces {
   margin: 0 0 0.25rem 1.5rem;
   font-size: 0.78rem;
-}
-
-.sidebar__footer p {
-  font-size: 0.76rem;
-  margin: 0.25rem 0;
-}
-
-.sidebar__heartbeat {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  width: 100%;
-  min-width: 0;
-  padding: 0.25rem 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 0.7rem;
-  overflow: hidden;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar__heartbeat:hover:not(:disabled) {
-  background: transparent;
-  color: var(--text);
 }
 
 /* Bottom-left utility corner: Event log + Settings */
@@ -3962,6 +3930,374 @@ button:active:not(:disabled) {
   }
 }
 
+/* Secondary destinations share the same quiet workspace geometry as threads. */
+.search,
+.automations,
+.settings,
+.inbox,
+.eventlog,
+.fleetgrid {
+  width: min(1040px, calc(100% - 3rem));
+  height: 100%;
+  margin: 0 auto;
+  padding: 4.8rem 0 3rem;
+  overflow: auto;
+  color: var(--text);
+}
+
+.fleetgrid {
+  width: min(1180px, calc(100% - 3rem));
+}
+
+.search__title,
+.inbox__title,
+.settings__head h1,
+.automations__title,
+.eventlog__head h1,
+.fleetgrid__title {
+  margin: 0;
+  color: #202124;
+  font-size: 1.45rem;
+  font-weight: 620;
+  letter-spacing: -0.025em;
+}
+
+.settings__head,
+.automations__head,
+.eventlog__head,
+.fleetgrid__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 52px;
+  margin: 0;
+  padding: 0 0 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings__head,
+.automations__title {
+  gap: 0.55rem;
+}
+
+.settings__head {
+  justify-content: flex-start;
+}
+
+.settings__note,
+.automations__intro,
+.eventlog__note,
+.fleetgrid__subtitle {
+  max-width: 680px;
+  margin: 0.85rem 0 1.6rem;
+  color: #777a80;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.fleetgrid__eyebrow {
+  display: none;
+}
+
+.search__form {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 1.35rem 0 1.6rem;
+  padding: 0.5rem 0.55rem 0.5rem 0.85rem;
+  border: 1px solid #dadce0;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 4px 18px rgba(25, 29, 36, 0.05);
+}
+
+.search__form input {
+  min-height: 40px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.search__form input:focus {
+  outline: 0;
+}
+
+.search__form button,
+.fleetgrid__new,
+.automations__head > button {
+  min-height: 38px;
+  border: 1px solid #dcdde0;
+  border-radius: 9px;
+  background: #f7f7f8;
+  box-shadow: none;
+}
+
+.search__section {
+  margin-top: 1.7rem;
+}
+
+.search__section-title,
+.automations__subtitle,
+.fleetgroup__heading h2 {
+  margin: 0 0 0.6rem;
+  color: #7a7d83;
+  font-size: 0.78rem;
+  font-weight: 520;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.search__sessions,
+.search__hits,
+.automations__list,
+.automations__runs,
+.inbox__list,
+.eventlog__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.search__group,
+.search__sessions,
+.automations__list,
+.automations__history,
+.inbox__item,
+.settings__group,
+.eventlog__list,
+.fleetstats,
+.fleetfilters,
+.fleetbulk {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.search__group-head,
+.search__hit {
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.search__group-head:hover,
+.search__hit:hover:not(:disabled) {
+  background: #f3f3f4;
+}
+
+.search__sessions {
+  padding: 0.35rem;
+}
+
+.search__group {
+  margin-bottom: 0.75rem;
+  padding: 0.35rem;
+}
+
+.search__empty,
+.automations__empty,
+.fleetgrid__empty,
+.eventlog > .muted:last-child {
+  margin: 2rem 0;
+  padding: 2.5rem;
+  border: 1px dashed #d7d9dd;
+  border-radius: 12px;
+  background: #fafafa;
+  text-align: center;
+}
+
+.automations__list {
+  overflow: hidden;
+}
+
+.automations__item {
+  min-height: 66px;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+}
+
+.automations__item:last-child {
+  border-bottom: 0;
+}
+
+.automations__history {
+  margin-top: 1.5rem;
+  padding: 1rem;
+}
+
+.automations__form {
+  margin: 1rem 0 1.5rem;
+  padding: 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fafafa;
+  box-shadow: none;
+}
+
+.settings__group {
+  margin: 0 0 1rem;
+  overflow: hidden;
+}
+
+.settings__row {
+  min-height: 66px;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+}
+
+.settings__row:last-child {
+  border-bottom: 0;
+}
+
+.settings__label > span:first-child {
+  color: #282a2e;
+  font-weight: 520;
+}
+
+.settings__label .muted {
+  margin-top: 0.18rem;
+  font-size: 0.78rem;
+}
+
+.inbox__title {
+  padding-bottom: 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.inbox__empty {
+  display: grid;
+  place-items: center;
+  min-height: 290px;
+  margin-top: 1.25rem;
+  border: 1px dashed #d7d9dd;
+  border-radius: 12px;
+  background: #fafafa;
+  text-align: center;
+}
+
+.inbox__empty p {
+  margin: -5rem 0 0;
+}
+
+.inbox__list {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.inbox__item {
+  padding: 0.65rem;
+}
+
+.eventlog__controls {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.eventlog__list {
+  overflow: hidden;
+}
+
+.eventlog__event {
+  min-height: 52px;
+  padding: 0.7rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.eventlog__event:last-child {
+  border-bottom: 0;
+}
+
+.fleetstats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 1.25rem 0 0.75rem;
+  overflow: hidden;
+}
+
+.fleetstats > span {
+  min-height: 64px;
+  padding: 0.8rem;
+  border-right: 1px solid var(--border);
+  background: #fff;
+}
+
+.fleetstats > span:last-child {
+  border-right: 0;
+}
+
+.fleetfilters {
+  display: flex;
+  gap: 0.55rem;
+  margin-bottom: 1.25rem;
+  padding: 0.6rem;
+}
+
+.fleetfilters input,
+.fleetfilters select {
+  min-height: 40px;
+  border-color: #dcdde0;
+  background: #fafafa;
+}
+
+.fleetgrid__groups {
+  gap: 1.5rem;
+}
+
+.fleetgroup__heading {
+  margin-bottom: 0.55rem;
+}
+
+.fleetgrid__cards {
+  grid-template-columns: repeat(auto-fill, minmax(285px, 1fr));
+  gap: 0.75rem;
+}
+
+.fleetcard {
+  border-color: var(--border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.fleetcard:hover {
+  border-color: #cfd1d5;
+  box-shadow: 0 5px 18px rgba(25, 29, 36, 0.05);
+}
+
+@media (max-width: 900px) {
+  .search,
+  .automations,
+  .settings,
+  .inbox,
+  .eventlog,
+  .fleetgrid {
+    width: calc(100% - 2rem);
+    padding-top: 4rem;
+  }
+
+  .fleetstats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fleetfilters {
+    flex-direction: column;
+  }
+}
+
+/* The browser-only fixture has no Tauri IPC bridge. Production errors remain
+   visible; only expected fixture transport errors are suppressed for QA. */
+[data-visual-reference="true"] .automations > .error,
+[data-visual-reference="true"] .eventlog > .error,
+[data-visual-reference="true"] .settings__group > .error {
+  display: none;
+}
+
 /* ------------------------------------------------------------------ *
  * Bugyo 0.3 — focused command-center shell
  * Quiet structure, one obvious next action, detail on demand.
@@ -4016,8 +4352,8 @@ body {
 }
 
 .sidebar {
-  width: 264px;
-  min-width: 264px;
+  width: clamp(240px, 30vw, 304px);
+  min-width: clamp(240px, 30vw, 304px);
   padding: 3.65rem 0.6rem 0.6rem;
   background: #f5f5f6;
   border-right-color: var(--border);
@@ -4041,8 +4377,7 @@ body {
 }
 
 .sidebar__brand-copy small {
-  color: #686d76;
-  letter-spacing: 0.06em;
+  display: none;
 }
 
 .sidebar__new {
@@ -4298,6 +4633,7 @@ body {
 }
 
 .pane__header {
+  height: 56px;
   min-height: 56px;
   padding: 0.35rem 0.75rem;
   flex-wrap: nowrap;
@@ -4309,10 +4645,12 @@ body {
 
 .pane__actions {
   flex: none;
+  gap: 0.15rem;
 }
 
 .pane__action {
   min-height: 40px;
+  padding-inline: 0.5rem;
   border-color: transparent;
   background: transparent;
 }
@@ -4400,9 +4738,9 @@ body {
 
 .chatbox {
   max-width: 760px;
-  min-height: 64px;
-  margin-bottom: 1rem;
-  padding: 0.6rem 0.55rem 0.6rem 1rem;
+  min-height: 80px;
+  margin-bottom: 1.25rem;
+  padding: 0.75rem 0.65rem 0.75rem 1.1rem;
   border-color: #d9dade;
   border-radius: 17px;
   box-shadow: 0 6px 24px rgba(15, 18, 24, 0.08);
@@ -4411,8 +4749,8 @@ body {
 .chatbox__send,
 .chatbox__stop,
 .chatbox__shot {
-  width: 44px;
-  height: 44px;
+  width: 52px;
+  height: 52px;
 }
 
 .review-inspector {
@@ -4425,10 +4763,48 @@ body {
 }
 
 .statusbar {
-  min-height: 36px;
+  min-height: 64px;
   gap: 0.8rem;
   padding: 0.2rem 0.8rem;
   background: #fafafa;
+}
+
+/* Split panes prioritize operational state and actions. The full identity is
+   still exposed by the section's accessible content, while the visual title
+   yields before controls wrap into a second header row. */
+.pane--split .pane__title {
+  max-width: 9rem;
+}
+
+.pane--split .pane__title-project,
+.pane--split .pane__title-sep {
+  display: none;
+}
+
+.pane--split .pane__action {
+  min-width: 40px;
+}
+
+@media (max-width: 1100px) {
+  .pane--split .pane__title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .pane--split .pane__header {
+    gap: 0.25rem;
+  }
+
+  .pane--split .pane__actions {
+    margin-left: auto;
+  }
 }
 
 @media (max-width: 980px) {
@@ -4495,10 +4871,6 @@ button[aria-label],
 /* At laptop-height windows, fleet telemetry is already available in the
    status bar. Give the primary project/session list the reclaimed space. */
 @media (max-height: 700px) {
-  .sidebar__footer {
-    display: none;
-  }
-
   .sidebar__brand {
     min-height: 40px;
     margin-bottom: 0.15rem;
@@ -4522,5 +4894,428 @@ button[aria-label],
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Original Codex desktop shell — final visual authority
+ * ------------------------------------------------------------------ */
+:root {
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel-subtle: #f7f7f8;
+  --border: #e6e6e7;
+  --muted: #7d7d82;
+  --text: #202124;
+  --hover: #ededee;
+  --hover-strong: #e3e3e4;
+  --accent: #202124;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, Helvetica, Arial,
+    sans-serif;
+  font-size: 14px;
+}
+
+.app,
+.fleet,
+.fleet__main {
+  background: #fff;
+}
+
+.titlebar {
+  height: 50px;
+  padding-left: 86px;
+  border-bottom: 1px solid transparent;
+}
+
+.titlebar__btn {
+  width: 32px;
+  height: 32px;
+  color: #8b8d91;
+}
+
+.sidebar {
+  width: 348px;
+  min-width: 348px;
+  padding: 4.25rem 0.7rem 0.65rem;
+  gap: 0.05rem;
+  background: rgba(238, 244, 251, 0.9);
+  border-right: 1px solid #dfe3e8;
+  backdrop-filter: blur(24px) saturate(115%);
+}
+
+.sidebar__new {
+  min-height: 42px;
+  padding: 0.5rem 0.65rem;
+  color: #303338;
+  border-radius: 8px;
+  font-size: 0.94rem;
+  font-weight: 450;
+}
+
+.sidebar__new:first-of-type,
+.sidebar__new:first-of-type:hover:not(:disabled) {
+  margin: 0;
+  color: #202124;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sidebar__new:hover:not(:disabled),
+.sidebar__new--active,
+.sidebar__new--active:first-of-type {
+  background: rgba(80, 86, 94, 0.09);
+  box-shadow: none;
+}
+
+.sidebar__new--active::before {
+  display: none;
+}
+
+.sidebar__section {
+  min-height: 28px;
+  margin: 0.8rem 0 0.12rem;
+  padding: 0 0.55rem;
+  color: #8b8d93;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 450;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.sidebar__pinned ul,
+.sidebar__group ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sidebar__project {
+  min-height: 31px;
+  margin: 0.15rem 0;
+  padding: 0 0.55rem;
+  color: #5f6268;
+  font-size: 0.82rem;
+  font-weight: 450;
+}
+
+.sidebar__item {
+  min-height: 38px;
+  padding: 0.38rem 0.55rem 0.38rem 1rem;
+  color: #303338;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.sidebar__item--active {
+  color: #202124;
+  background: rgba(70, 75, 82, 0.11);
+  box-shadow: none;
+}
+
+.sidebar__age {
+  color: #85878c;
+  font-size: 0.73rem;
+}
+
+.sidebar__corner {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: 0.15rem;
+  padding-top: 0.35rem;
+  border-top: 0;
+}
+
+.sidebar__settings-link {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 38px;
+  padding: 0.4rem 0.55rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #41444a;
+  font-weight: 450;
+}
+
+.sidebar__settings-link:hover,
+.sidebar__settings-link--active {
+  background: rgba(70, 75, 82, 0.09);
+}
+
+.fleet__main {
+  padding-top: 0;
+}
+
+.pane__header {
+  height: 66px;
+  min-height: 66px;
+  padding: 0 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.97);
+}
+
+.pane__title {
+  gap: 0.4rem;
+  font-size: 0.94rem;
+  font-weight: 590;
+}
+
+.pane__title > svg,
+.pane__title-sep {
+  display: none;
+}
+
+.pane__title-project {
+  order: 2;
+  color: #929398;
+  font-weight: 450;
+}
+
+.pane__title-name,
+.pane__title > code {
+  order: 1;
+  padding: 0;
+  background: transparent;
+  color: #202124;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 590;
+}
+
+.pane__header > .badge {
+  border: 0;
+  background: transparent;
+  color: #8b8d92;
+  font-size: 0.72rem;
+}
+
+.pane__actions {
+  margin-left: auto;
+}
+
+.pane__action {
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #373a40;
+  font-weight: 500;
+}
+
+.pane__action--active,
+.pane__action:hover:not(:disabled) {
+  background: #f0f0f1;
+}
+
+.pane__workspace {
+  min-height: 0;
+}
+
+.pane__workspace--review {
+  grid-template-columns: minmax(430px, 56%) minmax(460px, 44%);
+}
+
+.pane__workspace--review-expanded {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.pane__workspace--review-expanded .pane__conversation {
+  visibility: hidden;
+  overflow: hidden;
+}
+
+.chat {
+  max-width: 760px;
+  padding: 2.2rem 1.5rem 1.2rem;
+  gap: 1.2rem;
+}
+
+.chat__cwd {
+  display: none;
+}
+
+.msg--user {
+  max-width: 76%;
+}
+
+.msg__bubble {
+  padding: 0.72rem 0.95rem;
+  border-radius: 15px;
+  background: #f1f1f2;
+}
+
+.msg--agent {
+  color: #24262a;
+  font-size: 0.96rem;
+  line-height: 1.55;
+}
+
+.chatbox {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto 38px;
+  align-items: center;
+  gap: 0.2rem 0.35rem;
+  width: calc(100% - 3rem);
+  max-width: 760px;
+  min-height: 112px;
+  margin: 0 auto 0.8rem;
+  padding: 0.65rem 0.65rem 0.55rem 0.95rem;
+  border: 1px solid #dfe0e2;
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 6px 24px rgba(20, 24, 32, 0.07);
+}
+
+.chatbox__input {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-height: 45px;
+  padding: 0.2rem 0.1rem;
+}
+
+.chatbox__meta {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.chatbox__meta-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 34px;
+  padding: 0 0.4rem;
+  border: 0;
+  background: transparent;
+  color: #85878c;
+  font-size: 0.78rem;
+}
+
+.chatbox__meta-spacer {
+  flex: 1;
+}
+
+.chatbox__model {
+  color: #8a8c91;
+  font-size: 0.76rem;
+}
+
+.chatbox__environment {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: calc(100% - 3rem);
+  max-width: 760px;
+  min-height: 30px;
+  margin: 0 auto 0.45rem;
+  color: #85878d;
+  font-size: 0.76rem;
+}
+
+.chatbox__stop,
+.chatbox__shot,
+.chatbox__send {
+  grid-row: 2;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  border: 0;
+}
+
+.review-inspector {
+  border-left: 1px solid var(--border);
+  background: #fff;
+}
+
+.review-inspector__header {
+  min-height: 52px;
+  background: #fff;
+}
+
+.review-summary > summary,
+.review-summary__files button {
+  background: #fff;
+}
+
+.statusbar {
+  display: none;
+}
+
+.codex-page {
+  width: min(980px, calc(100% - 3rem));
+  margin: 0 auto;
+  padding: 5rem 0 3rem;
+  overflow: auto;
+}
+
+.codex-page__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.codex-page__header h1,
+.plugin-card h2 {
+  margin: 0;
+}
+
+.codex-page__header p,
+.plugin-card p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+
+.plugin-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  padding-top: 1.5rem;
+}
+
+.plugin-card {
+  min-height: 170px;
+  padding: 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.plugin-card ul {
+  margin: 0.8rem 0 0;
+  padding-left: 1.1rem;
+}
+
+@media (max-width: 1180px) {
+  .sidebar {
+    width: 290px;
+    min-width: 290px;
+  }
+  .pane__workspace--review {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pane__workspace--review .pane__conversation {
+    display: none;
+  }
+  .pane__review {
+    position: relative;
+    inset: auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .sidebar {
+    width: 238px;
+    min-width: 238px;
+  }
+  .plugin-grid {
+    grid-template-columns: 1fr;
   }
 }

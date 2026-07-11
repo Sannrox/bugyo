@@ -91,6 +91,20 @@ describe("Sidebar — pin & rename", () => {
     expect(labels[0]).toBe("feat-c"); // pinned first
   });
 
+  it("keeps pinned sessions and projects in the same bounded scroller", () => {
+    const { addSession, togglePin } = useFleet.getState();
+    addSession({ sessionId: "a", workspace: ws("feat-a", "/repo1") });
+    togglePin("a");
+
+    const { container } = render(<Sidebar />);
+    const scroller = container.querySelector(".sidebar__scroll");
+
+    expect(scroller).not.toBeNull();
+    expect(within(scroller as HTMLElement).getByText("Pinned")).toBeVisible();
+    expect(within(scroller as HTMLElement).getByText("Projects")).toBeVisible();
+    expect(within(scroller as HTMLElement).getByText("feat-a")).toBeVisible();
+  });
+
   it("enters inline rename mode from the context menu and commits", () => {
     const { addSession } = useFleet.getState();
     addSession({ sessionId: "a", workspace: ws("feat-a", "/repo1") });
@@ -166,7 +180,15 @@ describe("Sidebar — pin & rename", () => {
       screen.getByRole("button", { name: /fleet overview/i }),
     ).toHaveAttribute("aria-current", "page");
     expect(
-      screen.getByRole("button", { name: /new task/i }),
+      screen.getByRole("button", { name: /new chat/i }),
     ).not.toHaveAttribute("aria-current");
+  });
+
+  it("leaves fleet telemetry to the global status bar", () => {
+    useFleet.getState().addSession({ sessionId: "a" });
+    render(<Sidebar />);
+
+    expect(screen.queryByLabelText("fleet activity")).toBeNull();
+    expect(screen.getByLabelText("event log")).toBeInTheDocument();
   });
 });

@@ -31,6 +31,7 @@ import SearchPanel from "./SearchPanel";
 import StatusBar from "./StatusBar";
 import Timeline from "./Timeline";
 import UpdateBanner from "./UpdateBanner";
+import Plugins from "./Plugins";
 
 export default function Fleet() {
   const activeId = useFleet((s) => s.activeId);
@@ -308,6 +309,8 @@ export default function Fleet() {
           <Automations />
         ) : panel === "settings" ? (
           <Settings />
+        ) : panel === "plugins" ? (
+          <Plugins />
         ) : panel === "fleet" ? (
           <FleetGrid />
         ) : panel === "search" ? (
