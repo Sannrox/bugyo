@@ -21,6 +21,7 @@ vi.mock("./lib/ipc", () => ({
     async (params: { task: string; repoRoot: string }) => ({
       sessionId: params.task === "feat a" ? "sess-a" : "sess-b",
       workspace: {
+        task: params.task === "feat a" ? "feat-a" : "feat-b",
         repoRoot: params.repoRoot,
         baseBranch: "main",
         branch: params.task === "feat a" ? "feat-a" : "feat-b",
@@ -36,15 +37,26 @@ vi.mock("./lib/ipc", () => ({
     stdout: "ok",
     stderr: "",
   })),
+  workspaceCommit: vi.fn(async () => {}),
   workspaceMerge: vi.fn(async () => {}),
   workspaceMergePreview: vi.fn(async () => ({
     clean: true,
     conflictedFiles: [],
   })),
   workspaceOpenPr: vi.fn(async () => "https://example/pr/1"),
+  workspaceReviewState: vi.fn(async () => ({
+    stage: "needsReview",
+    hasChanges: true,
+    hasUncommittedChanges: false,
+    changedFiles: ["src/main.rs"],
+    lastCheck: null,
+    pullRequestUrl: null,
+  })),
   acpCloseSession: vi.fn(async () => {}),
   acpDeleteSession: vi.fn(async () => {}),
   orchEnqueue: vi.fn(async () => {}),
+  orchQueue: vi.fn(async () => []),
+  orchQueueReplace: vi.fn(async () => {}),
   orchPreview: vi.fn(async () => ({
     ts: "",
     dryRun: true,
@@ -54,17 +66,28 @@ vi.mock("./lib/ipc", () => ({
   orchHeartbeatSecs: vi.fn(async () => 10),
   orchLog: vi.fn(async () => []),
   projectList: vi.fn(async () => [
-    { path: "/repo1", name: "repo1", isGitRepo: true },
+    {
+      path: "/repo1",
+      name: "repo1",
+      isGitRepo: true,
+      baseBranch: "main",
+      setupScript: "",
+      checkScript: "",
+    },
   ]),
   projectAdd: vi.fn(async (path: string) => ({
     path,
     name: path.split("/").pop() ?? path,
     isGitRepo: true,
+    baseBranch: "main",
+    setupScript: "",
+    checkScript: "",
   })),
   projectRemove: vi.fn(async () => {}),
   trustProfileList: vi.fn(async () => []),
   trustProfileEffectiveTools: vi.fn(async () => []),
   sessionTranscript: vi.fn(async () => []),
+  sessionSearch: vi.fn(async () => []),
   setAttentionBadge: vi.fn(async () => {}),
   budgetGet: vi.fn(async () => ({ sessionCap: null, projectCaps: [] })),
   pickDirectory: vi.fn(async () => null),
@@ -85,7 +108,7 @@ vi.mock("./lib/ipc", () => ({
 import Fleet from "./Fleet";
 
 async function createWorkspace(repo: string, task: string) {
-  fireEvent.click(screen.getByRole("button", { name: /new session/i }));
+  fireEvent.click(screen.getByRole("button", { name: /new task/i }));
   // The project must be registered (seeded via the projectList mock).
   await screen.findByRole("option", { name: "repo1" });
   fireEvent.change(screen.getByLabelText("project"), {
@@ -97,13 +120,49 @@ async function createWorkspace(repo: string, task: string) {
 
 describe("Fleet", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     h.handler = null;
     useFleet.setState({
       sessions: {},
       order: [],
       activeId: null,
       secondaryId: null,
+      panel: null,
+      projects: [],
+      errors: [],
     });
+  });
+
+  it("surfaces startup failures and retries hydration in place", async () => {
+    const { projectList } = await import("./lib/ipc");
+    vi.mocked(projectList).mockRejectedValueOnce(
+      new Error("project store offline"),
+    );
+    render(<Fleet />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /unable to load projects.*project store offline/i,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /retry startup loads/i }),
+    );
+
+    await waitFor(() => expect(projectList).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByRole("option", { name: "repo1" }),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces event subscription failures instead of losing live updates silently", async () => {
+    const { onOrchQueue } = await import("./lib/ipc");
+    vi.mocked(onOrchQueue).mockRejectedValueOnce(
+      new Error("event bridge down"),
+    );
+    render(<Fleet />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /unable to subscribe to queue updates.*event bridge down/i,
+    );
   });
 
   it("manages two workspaces and routes events to the active pane", async () => {
@@ -125,6 +184,11 @@ describe("Fleet", () => {
       h.handler!({ type: "agentMessage", sessionId: "sess-a", text: "hi A" });
       h.handler!({ type: "status", sessionId: "sess-a", status: "idle" });
     });
+    await waitFor(() =>
+      expect(useFleet.getState().sessions["sess-a"]?.review?.stage).toBe(
+        "needsReview",
+      ),
+    );
     // B is active; its transcript is empty.
     expect(screen.getByLabelText("transcript")).not.toHaveTextContent("hi A");
 
@@ -167,8 +231,14 @@ describe("Fleet", () => {
       expect(text).toContain("from B");
     });
 
-    // Unsplit collapses back to a single pane.
-    fireEvent.click(screen.getByRole("button", { name: /^unsplit$/i }));
+    // Unsplit stays visible in both pane headers so it cannot be hidden behind
+    // transcript or review content.
+    expect(
+      screen.getAllByRole("button", { name: /close split view/i }),
+    ).toHaveLength(2);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /close split view/i })[0],
+    );
     await waitFor(() =>
       expect(screen.getAllByLabelText("transcript")).toHaveLength(1),
     );
@@ -192,35 +262,166 @@ describe("Fleet", () => {
     );
   });
 
-  it("gates merge on a green check run", async () => {
+  it("keeps follow-up conversation visible beside backend-derived review", async () => {
     render(<Fleet />);
     await waitFor(() => expect(h.handler).not.toBeNull());
 
     await createWorkspace("/repo1", "feat a");
     await screen.findByRole("button", { name: /feat-a/i });
 
-    // Open the review panel.
-    fireEvent.click(screen.getByText(/review & merge/i));
+    const { workspaceReviewState } = await import("./lib/ipc");
+    vi.mocked(workspaceReviewState)
+      .mockResolvedValueOnce({
+        stage: "needsReview",
+        hasChanges: true,
+        hasUncommittedChanges: false,
+        changedFiles: ["src/main.rs"],
+        lastCheck: null,
+        pullRequestUrl: null,
+      })
+      .mockResolvedValueOnce({
+        stage: "readyToLand",
+        hasChanges: true,
+        hasUncommittedChanges: false,
+        changedFiles: ["src/main.rs"],
+        lastCheck: {
+          script: "cargo test",
+          success: true,
+          exitCode: 0,
+          completedAt: "2026-07-10T12:00:00Z",
+          changeFingerprint: "abc",
+        },
+        pullRequestUrl: null,
+      });
+
+    // Open the inspector without replacing the conversation or composer.
+    fireEvent.click(screen.getByRole("button", { name: /^review$/i }));
+    await screen.findByRole("region", { name: /workspace review/i });
+    expect(screen.getByLabelText("transcript")).toBeInTheDocument();
+    expect(screen.getByLabelText("prompt")).toBeInTheDocument();
 
     // Merge is disabled before checks pass.
     const mergeBtn = screen.getByRole("button", { name: /^merge$/i });
     expect(mergeBtn).toBeDisabled();
 
-    // Run checks (mock returns success).
-    fireEvent.change(screen.getByLabelText("check script"), {
-      target: { value: "cargo test" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /run checks/i }));
-
-    const { workspaceCheck } = await import("./lib/ipc");
-    await waitFor(() =>
-      expect(workspaceCheck).toHaveBeenCalledWith("sess-a", "cargo test"),
-    );
+    // A refresh observes the agent-produced green verification state.
+    fireEvent.click(screen.getByRole("button", { name: /refresh review/i }));
     await screen.findByText(/checks passed/i);
 
     // Now merge is enabled.
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^merge$/i })).toBeEnabled(),
+    );
+  });
+
+  it("runs configured verification automatically when the agent finishes", async () => {
+    render(<Fleet />);
+    await waitFor(() => expect(h.handler).not.toBeNull());
+
+    await createWorkspace("/repo1", "feat a");
+    await screen.findByRole("button", { name: /feat-a/i });
+    const project = useFleet.getState().projects[0];
+    useFleet.getState().updateProject({
+      ...project,
+      checkScript: "cargo test",
+    });
+
+    const { workspaceCheck, workspaceReviewState } = await import("./lib/ipc");
+    vi.mocked(workspaceReviewState)
+      .mockReset()
+      .mockResolvedValueOnce({
+        stage: "needsReview",
+        hasChanges: true,
+        hasUncommittedChanges: true,
+        changedFiles: ["src/main.rs"],
+        lastCheck: null,
+        pullRequestUrl: null,
+      })
+      .mockResolvedValueOnce({
+        stage: "readyToLand",
+        hasChanges: true,
+        hasUncommittedChanges: true,
+        changedFiles: ["src/main.rs"],
+        lastCheck: {
+          script: "cargo test",
+          success: true,
+          exitCode: 0,
+          completedAt: "2026-07-10T12:00:00Z",
+          changeFingerprint: "abc",
+        },
+        pullRequestUrl: null,
+      });
+
+    act(() => {
+      h.handler!({ type: "status", sessionId: "sess-a", status: "idle" });
+    });
+
+    await waitFor(() =>
+      expect(workspaceCheck).toHaveBeenCalledWith("sess-a", "cargo test"),
+    );
+    await waitFor(() =>
+      expect(useFleet.getState().sessions["sess-a"].review?.stage).toBe(
+        "readyToLand",
+      ),
+    );
+  });
+
+  it("returns a failed automatic verification to the agent", async () => {
+    render(<Fleet />);
+    await waitFor(() => expect(h.handler).not.toBeNull());
+
+    await createWorkspace("/repo1", "feat a");
+    await screen.findByRole("button", { name: /feat-a/i });
+    const project = useFleet.getState().projects[0];
+    useFleet.getState().updateProject({
+      ...project,
+      checkScript: "cargo test",
+    });
+
+    const { orchEnqueue, workspaceCheck, workspaceReviewState } =
+      await import("./lib/ipc");
+    vi.mocked(workspaceCheck).mockResolvedValueOnce({
+      success: false,
+      exitCode: 101,
+      stdout: "",
+      stderr: "test failed: expected ready",
+    });
+    vi.mocked(workspaceReviewState)
+      .mockReset()
+      .mockResolvedValueOnce({
+        stage: "needsReview",
+        hasChanges: true,
+        hasUncommittedChanges: true,
+        changedFiles: ["src/main.rs"],
+        lastCheck: null,
+        pullRequestUrl: null,
+      })
+      .mockResolvedValueOnce({
+        stage: "needsReview",
+        hasChanges: true,
+        hasUncommittedChanges: true,
+        changedFiles: ["src/main.rs"],
+        lastCheck: {
+          script: "cargo test",
+          success: false,
+          exitCode: 101,
+          completedAt: "2026-07-10T12:00:00Z",
+          changeFingerprint: "abc",
+        },
+        pullRequestUrl: null,
+      });
+
+    act(() => {
+      h.handler!({ type: "status", sessionId: "sess-a", status: "idle" });
+    });
+
+    await waitFor(() =>
+      expect(orchEnqueue).toHaveBeenCalledWith(
+        "sess-a",
+        expect.stringMatching(
+          /cargo test[\s\S]*exit 101[\s\S]*expected ready/i,
+        ),
+      ),
     );
   });
 
@@ -329,24 +530,62 @@ describe("Fleet", () => {
     await waitFor(() => expect(acpCancel).toHaveBeenCalledWith("sess-a"));
   });
 
-  it("close keeps the session (resumable); delete removes it", async () => {
+  it("opens global search with the standard desktop shortcut", async () => {
+    render(<Fleet />);
+
+    fireEvent.keyDown(document, { key: "f", metaKey: true });
+
+    expect(
+      await screen.findByRole("heading", { name: /^search$/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("search query")).toHaveFocus();
+  });
+
+  it("moves focus into the session menu and restores it on Escape", async () => {
+    render(<Fleet />);
+    await waitFor(() => expect(h.handler).not.toBeNull());
+
+    await createWorkspace("/repo1", "feat a");
+    const trigger = screen.getByRole("button", {
+      name: /more session actions/i,
+    });
+    fireEvent.click(trigger);
+
+    const menu = screen.getByRole("menu", { name: /session actions/i });
+    expect(menu).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("menuitem", { name: /stop agent/i }),
+      ).toHaveFocus(),
+    );
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(menu).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("stops in place so the session remains reviewable; delete removes it", async () => {
     render(<Fleet />);
     await waitFor(() => expect(h.handler).not.toBeNull());
 
     await createWorkspace("/repo1", "feat a");
     await screen.findByRole("button", { name: /feat-a/i });
 
-    // Close releases the process but keeps the session in the sidebar.
-    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    // Stop is persistent in the pane header. It releases the process but keeps
+    // the session in the sidebar.
+    fireEvent.click(screen.getByRole("button", { name: /stop agent/i }));
     const { acpCloseSession, acpDeleteSession } = await import("./lib/ipc");
     await waitFor(() => expect(acpCloseSession).toHaveBeenCalledWith("sess-a"));
-    // Deselected → composer shown, but the session is still listed.
-    await screen.findByRole("heading", { name: /what should bugyo run/i });
+    expect(useFleet.getState().sessions["sess-a"].state.status).toBe(
+      "disconnected",
+    );
+    // The session stays selected so transcript and review remain available.
+    expect(screen.getByLabelText("transcript")).toBeInTheDocument();
+    expect(screen.getByText(/agent is stopped/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /feat-a/i })).toBeInTheDocument();
 
-    // Reselect and delete via the sidebar row's action menu → removed.
-    fireEvent.click(screen.getByRole("button", { name: /feat-a/i }));
-    fireEvent.click(screen.getByRole("button", { name: /session actions/i }));
+    // Delete via the sidebar row's action menu → removed.
+    fireEvent.click(screen.getByRole("button", { name: /^session actions$/i }));
     fireEvent.click(screen.getByRole("menuitem", { name: /delete session/i }));
     await waitFor(() =>
       expect(acpDeleteSession).toHaveBeenCalledWith("sess-a"),

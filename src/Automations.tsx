@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { Clock, Play, Plus, Trash2 } from "lucide-react";
 import {
@@ -42,12 +42,30 @@ export default function Automations() {
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [editing, setEditing] = useState<Automation | "new" | null>(null);
   const [error, setError] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [action, setAction] = useState("");
+  const sessions = useFleet((state) => state.sessions);
+  const setActive = useFleet((state) => state.setActive);
+
+  function readableTarget(target: AutomationTarget): string {
+    if (target.type !== "existingSession") return targetLabel(target);
+    const session = sessions[target.sessionId];
+    return (
+      session?.name ||
+      session?.workspace?.task ||
+      session?.workspace?.branch ||
+      `session ${target.sessionId.slice(0, 8)}`
+    );
+  }
 
   async function refresh() {
     try {
+      setError("");
       setItems(await automationList());
     } catch (e) {
       setError(String(e));
+    } finally {
+      setLoaded(true);
     }
   }
 
@@ -59,12 +77,14 @@ export default function Automations() {
   useEffect(() => {
     let active = true;
     let unlisten: UnlistenFn | undefined;
-    onAutomationRun((run) => setRuns((r) => [run, ...r].slice(0, 50))).then(
-      (fn) => {
+    onAutomationRun((run) => setRuns((r) => [run, ...r].slice(0, 50)))
+      .then((fn) => {
         if (active) unlisten = fn;
         else fn();
-      },
-    );
+      })
+      .catch((cause) => {
+        if (active) setError(String(cause));
+      });
     return () => {
       active = false;
       unlisten?.();
@@ -72,15 +92,22 @@ export default function Automations() {
   }, []);
 
   async function toggle(a: Automation) {
+    const key = `toggle:${a.id}`;
+    if (action) return;
     try {
+      setAction(key);
+      setError("");
       const updated = await automationUpdate({ ...a, enabled: !a.enabled });
       setItems((xs) => xs.map((x) => (x.id === updated.id ? updated : x)));
     } catch (e) {
       setError(String(e));
+    } finally {
+      setAction("");
     }
   }
 
   async function remove(id: string) {
+    if (action) return;
     const a = items.find((x) => x.id === id);
     const ok = await confirmDialog(
       `Delete automation "${a?.name ?? id}"? This removes its schedule and ` +
@@ -89,19 +116,28 @@ export default function Automations() {
     );
     if (!ok) return;
     try {
+      setAction(`delete:${id}`);
+      setError("");
       await automationRemove(id);
       setItems((xs) => xs.filter((x) => x.id !== id));
     } catch (e) {
       setError(String(e));
+    } finally {
+      setAction("");
     }
   }
 
   async function runNow(id: string) {
+    if (action) return;
     try {
+      setAction(`run:${id}`);
+      setError("");
       const run = await automationRunNow(id);
       setRuns((r) => [run, ...r].slice(0, 50));
     } catch (e) {
       setError(String(e));
+    } finally {
+      setAction("");
     }
   }
 
@@ -144,11 +180,15 @@ export default function Automations() {
         />
       )}
 
-      {items.length === 0 ? (
+      {!loaded ? (
+        <p className="muted automations__empty" role="status">
+          Loading automations…
+        </p>
+      ) : items.length === 0 && !error ? (
         <p className="muted automations__empty">
           No automations yet. Create one to run a task on a schedule.
         </p>
-      ) : (
+      ) : items.length > 0 ? (
         <ul className="automations__list">
           {items.map((a) => (
             <li key={a.id} className="automations__item">
@@ -156,6 +196,7 @@ export default function Automations() {
                 <input
                   type="checkbox"
                   checked={a.enabled}
+                  disabled={Boolean(action)}
                   onChange={() => void toggle(a)}
                   aria-label={`enable ${a.name}`}
                 />
@@ -163,8 +204,9 @@ export default function Automations() {
               <div className="automations__meta">
                 <span className="automations__name">{a.name}</span>
                 <span className="muted automations__sub">
-                  {scheduleLabel(a.schedule)} · {targetLabel(a.target)}
-                  {a.trust.type === "trustAll" && " · ⚠ trust-all"}
+                  {scheduleLabel(a.schedule)} · {readableTarget(a.target)}
+                  {a.trust.type === "trustAll" &&
+                    " · legacy trust-all disabled; approvals required"}
                   {a.lastRun
                     ? ` · last ${a.lastRun.slice(11, 19)}`
                     : " · never run"}
@@ -175,14 +217,17 @@ export default function Automations() {
                 className="pane__action"
                 onClick={() => void runNow(a.id)}
                 aria-label={`run ${a.name} now`}
+                disabled={Boolean(action)}
               >
-                <Play size={13} aria-hidden /> Run now
+                <Play size={13} aria-hidden />
+                {action === `run:${a.id}` ? "Running…" : "Run now"}
               </button>
               <button
                 type="button"
                 className="pane__action"
                 onClick={() => setEditing(a)}
                 aria-label={`edit ${a.name}`}
+                disabled={Boolean(action)}
               >
                 Edit
               </button>
@@ -191,13 +236,18 @@ export default function Automations() {
                 className="pane__action"
                 onClick={() => void remove(a.id)}
                 aria-label={`delete ${a.name}`}
+                disabled={Boolean(action)}
               >
-                <Trash2 size={13} aria-hidden />
+                {action === `delete:${a.id}` ? (
+                  "Deleting…"
+                ) : (
+                  <Trash2 size={13} aria-hidden />
+                )}
               </button>
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
 
       <section className="automations__history" aria-label="run history">
         <h2 className="automations__subtitle">Recent runs</h2>
@@ -210,9 +260,22 @@ export default function Automations() {
                 <span className={`badge badge--${r.status}`}>{r.status}</span>
                 <span className="muted">{r.ts.slice(11, 19)}</span>
                 {r.sessionId && (
-                  <span className="automations__runsess">
-                    {r.sessionId.slice(0, 8)}
-                  </span>
+                  <button
+                    type="button"
+                    className="automations__runsess"
+                    onClick={() => setActive(r.sessionId!)}
+                    disabled={!sessions[r.sessionId]}
+                    title={
+                      sessions[r.sessionId]
+                        ? "Open target session"
+                        : "Session is no longer available"
+                    }
+                  >
+                    {sessions[r.sessionId]?.name ||
+                      sessions[r.sessionId]?.workspace?.task ||
+                      sessions[r.sessionId]?.workspace?.branch ||
+                      r.sessionId.slice(0, 8)}
+                  </button>
                 )}
                 {r.message && <span className="error">{r.message}</span>}
               </li>
@@ -226,7 +289,7 @@ export default function Automations() {
 
 type ScheduleKind = "interval" | "cron";
 type TargetKind = AutomationTarget["type"];
-type TrustKind = TrustMode["type"];
+type TrustKind = Exclude<TrustMode["type"], "trustAll">;
 
 /** Create/edit form for a single automation. */
 function AutomationForm({
@@ -241,6 +304,7 @@ function AutomationForm({
   onError: (msg: string) => void;
 }) {
   const projects = useFleet((s) => s.projects);
+  const submitting = useRef(false);
   const sessionOrder = useFleet((s) => s.order);
   const sessions = useFleet((s) => s.sessions);
   const gitProjects = projects.filter((p) => p.isGitRepo);
@@ -294,7 +358,7 @@ function AutomationForm({
   );
 
   const [trustKind, setTrustKind] = useState<TrustKind>(
-    initial?.trust.type ?? "ask",
+    initial?.trust.type === "trustTools" ? "trustTools" : "ask",
   );
   const [trustTools, setTrustTools] = useState(
     initial?.trust.type === "trustTools" ? initial.trust.tools.join(", ") : "",
@@ -335,8 +399,6 @@ function AutomationForm({
     switch (trustKind) {
       case "ask":
         return { type: "ask" };
-      case "trustAll":
-        return { type: "trustAll" };
       case "trustTools":
         return {
           type: "trustTools",
@@ -348,7 +410,23 @@ function AutomationForm({
     }
   }
 
+  const targetReady =
+    (targetKind === "existingSession" && Boolean(sessionId)) ||
+    targetKind === "newSession" ||
+    (targetKind === "newWorkspace" && Boolean(projectPath));
+  const trustReady =
+    trustKind !== "trustTools" ||
+    trustTools.split(",").some((tool) => tool.trim().length > 0);
+  const canSubmit =
+    Boolean(name.trim()) &&
+    Boolean(prompt.trim()) &&
+    targetReady &&
+    trustReady &&
+    (scheduleKind !== "cron" || Boolean(cronExpr.trim()));
+
   async function submit() {
+    if (submitting.current) return;
+    submitting.current = true;
     try {
       setBusy(true);
       const automation: Automation = {
@@ -368,6 +446,7 @@ function AutomationForm({
     } catch (e) {
       onError(String(e));
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   }
@@ -380,20 +459,43 @@ function AutomationForm({
         void submit();
       }}
     >
-      <input
-        aria-label="automation name"
-        placeholder="Name"
-        value={name}
-        onChange={(e) => setName(e.currentTarget.value)}
-        required
-      />
-      <textarea
-        aria-label="durable prompt"
-        placeholder="Durable prompt — what the agent should do each time it runs"
-        value={prompt}
-        onChange={(e) => setPrompt(e.currentTarget.value)}
-        required
-      />
+      <div className="automations__formhead">
+        <div>
+          <strong>{initial ? "Edit automation" : "Create automation"}</strong>
+          <p>
+            Define the recurring outcome first, then choose where and how it
+            runs.
+          </p>
+        </div>
+        <button type="button" className="pane__action" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+
+      <label className="automations__field">
+        <span>Name</span>
+        <input
+          aria-label="automation name"
+          placeholder="e.g. Morning CI triage"
+          value={name}
+          onChange={(e) => setName(e.currentTarget.value)}
+          required
+        />
+      </label>
+      <label className="automations__field">
+        <span>Agent instructions</span>
+        <textarea
+          aria-label="durable prompt"
+          placeholder="Describe the outcome and what a successful run should report…"
+          value={prompt}
+          onChange={(e) => setPrompt(e.currentTarget.value)}
+          required
+        />
+      </label>
+
+      <div className="automations__section-label">
+        <span>1</span> Schedule
+      </div>
 
       <div className="ws-form__row">
         <label className="chip">
@@ -427,6 +529,9 @@ function AutomationForm({
         )}
       </div>
 
+      <div className="automations__section-label">
+        <span>2</span> Target
+      </div>
       <div className="ws-form__row">
         <label className="chip">
           Target
@@ -450,7 +555,8 @@ function AutomationForm({
             <option value="">Select a session…</option>
             {sessionOrder.map((id) => {
               const s = sessions[id];
-              const label = s?.workspace?.branch ?? "plain session";
+              const label =
+                s?.workspace?.task || s?.workspace?.branch || "Plain session";
               return (
                 <option key={id} value={id}>
                   {label} ({id.slice(0, 8)})
@@ -510,6 +616,9 @@ function AutomationForm({
         </div>
       )}
 
+      <div className="automations__section-label">
+        <span>3</span> Permissions
+      </div>
       <div className="ws-form__row">
         <label className="chip">
           Trust
@@ -520,7 +629,6 @@ function AutomationForm({
           >
             <option value="ask">Ask (default)</option>
             <option value="trustTools">Trust specific tools</option>
-            <option value="trustAll">Trust all tools</option>
           </select>
         </label>
         {trustKind === "trustTools" && (
@@ -533,19 +641,28 @@ function AutomationForm({
         )}
       </div>
 
-      {trustKind === "trustAll" && (
-        <p role="alert" className="warn">
-          ⚠ This automation will auto-approve every tool call — including writes
-          and destructive actions — without asking, each time it runs.
+      <p className="automations__guidance">
+        Writes, shell execution, and cloud actions always require approval.
+      </p>
+
+      {!targetReady && (
+        <p role="status" className="automations__guidance">
+          Choose a valid target before saving this automation.
+        </p>
+      )}
+      {!trustReady && (
+        <p role="status" className="automations__guidance">
+          Add at least one tool, or switch trust back to Ask.
         </p>
       )}
 
       <div className="automations__formactions">
-        <button type="submit" className="composer__send" disabled={busy}>
+        <button
+          type="submit"
+          className="composer__send"
+          disabled={busy || !canSubmit}
+        >
           {busy ? "…" : initial ? "Save" : "Create"}
-        </button>
-        <button type="button" className="pane__action" onClick={onCancel}>
-          Cancel
         </button>
       </div>
     </form>

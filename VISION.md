@@ -141,7 +141,8 @@ editors like Zed use to talk to coding agents). The Tauri (Rust) backend spawns
 - **Permission requests are first-class messages.** When the agent wants to run a
   tool or write, ACP surfaces a permission request the app answers with an
   explicit allow/deny — no attaching, no guessing (see §5). Trust can be
-  pre-scoped with `--trust-tools`, or fully opened with `--trust-all-tools`.
+  pre-scoped with `--trust-tools`; Bugyo deliberately never launches ACP with
+  `--trust-all-tools` because destructive actions must remain owner decisions.
 - **Agent/model/effort are launch parameters.** Each worker is configured via
   `--agent`, `--model`, `--effort`, and `--agent-engine` when spawned.
 
@@ -167,9 +168,9 @@ Make the human-in-the-loop moments loud and central.
 - ACP delivers each write/tool call as a **structured permission request**; the
   app raises it as a UI notification with inline **Approve / Deny** — no
   attaching, no scraping a prompt out of a pane.
-- Per-worker trust is set at launch (`--trust-tools <NAMES>` for a scoped
-  allowlist, `--trust-all-tools` for full autonomy) and reflects/edits the
-  `worker.json` `allowedTools` / `toolsSettings`.
+- Per-worker trust is set at launch with `--trust-tools <NAMES>` for a scoped,
+  non-destructive allowlist and reflects/edits the `worker.json` `allowedTools`
+  / `toolsSettings`.
 - Destructive actions and real product/security decisions always surface as an
   explicit owner decision, never auto-proceed.
 
@@ -266,11 +267,13 @@ for direct steering and tmux interop.
   launchd/cron heartbeat.
 - The state model (`workers/<name>.json`, `queue/<name>.jsonl`, `log.md`) and the
   dispatch/queue/heartbeat semantics are the reference behavior to port.
-- **kiro-cli already provides the transport this app needs:** `kiro-cli acp`
+- **kiro-cli provides the transport this app needs:** `kiro-cli acp`
   exposes an Agent Client Protocol agent over stdio, with `--agent`, `--model`,
-  `--effort`, `--trust-tools`/`--trust-all-tools`, and `--agent-engine` options.
-  The app builds on this rather than scraping terminals.
-- The Tauri app does not exist yet — this document defines its direction.
+  `--effort`, `--trust-tools`, and `--agent-engine` options used by Bugyo. The
+  upstream trust-all option is intentionally not exposed. The app builds on ACP
+  rather than scraping terminals.
+- The Tauri app now implements this direction; the milestones below describe
+  the product sequence rather than an unbuilt proposal.
 
 ## Milestones
 

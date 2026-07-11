@@ -11,6 +11,7 @@ import type {
   Project,
   SessionMeta,
   Workspace,
+  WorkspaceReviewState,
 } from "./bindings";
 import {
   initialSessionState,
@@ -24,6 +25,7 @@ export interface FleetSession {
   /** Repository the session's workspace belongs to (for grouping). */
   repoRoot: string | null;
   workspace: Workspace | null;
+  review: WorkspaceReviewState | null;
   state: SessionState;
   /** Tasks queued behind the current turn for this session. */
   queued: number;
@@ -69,8 +71,10 @@ export interface FleetStore {
   addSession: (input: {
     sessionId: string;
     workspace?: Workspace | null;
+    review?: WorkspaceReviewState | null;
     queued?: number;
     repoRoot?: string | null;
+    connected?: boolean;
   }) => void;
   removeSession: (sessionId: string) => void;
   setActive: (sessionId: string | null) => void;
@@ -85,6 +89,8 @@ export interface FleetStore {
   openSearch: () => void;
   openEventLog: () => void;
   setQueued: (sessionId: string, queued: number) => void;
+  setReview: (sessionId: string, review: WorkspaceReviewState) => void;
+  setConnected: (sessionId: string, connected: boolean) => void;
   setHeartbeat: (report: HeartbeatReport) => void;
   /** Append the user's own prompt to a session's transcript (optimistic). */
   appendUserMessage: (sessionId: string, text: string) => void;
@@ -92,6 +98,7 @@ export interface FleetStore {
   setTranscript: (sessionId: string, transcript: TranscriptEntry[]) => void;
   setProjects: (projects: Project[]) => void;
   addProject: (project: Project) => void;
+  updateProject: (project: Project) => void;
   removeProject: (path: string) => void;
   /** Toggle a session's pinned flag (pure; persistence is a caller concern). */
   togglePin: (sessionId: string) => void;
@@ -109,11 +116,16 @@ export interface FleetStore {
   applyEvents: (events: AcpEvent[]) => void;
   /** Dismiss one surfaced backend error by index. */
   dismissError: (index: number) => void;
+  /** Surface a non-event backend failure in the same bounded error banner. */
+  reportError: (message: string) => void;
 }
 
-/** A freshly-created/known session is ready → start it as idle, not disconnected. */
-function freshState(): SessionState {
-  return { ...initialSessionState, status: "idle" };
+/** New sessions are live; startup-hydrated sessions are explicitly cold. */
+function freshState(connected: boolean): SessionState {
+  return {
+    ...initialSessionState,
+    status: connected ? "idle" : "disconnected",
+  };
 }
 
 /** Route an event to the session it belongs to; null = not routable. */
@@ -145,7 +157,14 @@ export const useFleet = create<FleetStore>((set, get) => ({
   projects: [],
   errors: [],
 
-  addSession: ({ sessionId, workspace = null, queued = 0, repoRoot }) =>
+  addSession: ({
+    sessionId,
+    workspace = null,
+    review = null,
+    queued = 0,
+    repoRoot,
+    connected = true,
+  }) =>
     set((s) => {
       if (s.sessions[sessionId]) {
         return { activeId: sessionId };
@@ -153,8 +172,9 @@ export const useFleet = create<FleetStore>((set, get) => ({
       const session: FleetSession = {
         sessionId,
         workspace,
+        review,
         repoRoot: repoRoot ?? workspace?.repoRoot ?? null,
-        state: freshState(),
+        state: freshState(connected),
         queued,
         lastActivity: Date.now(),
         pinned: false,
@@ -186,7 +206,12 @@ export const useFleet = create<FleetStore>((set, get) => ({
       activeId: sessionId,
       panel: null,
       // A session can't be both the active and the split pane.
-      secondaryId: s.secondaryId === sessionId ? null : s.secondaryId,
+      // Entering the new-task composer is also a fresh workspace context, so
+      // never carry an old split pane into the task that will be created.
+      secondaryId:
+        sessionId === null || s.secondaryId === sessionId
+          ? null
+          : s.secondaryId,
     })),
 
   openSplit: (sessionId) =>
@@ -217,6 +242,36 @@ export const useFleet = create<FleetStore>((set, get) => ({
       if (!existing) return {};
       return {
         sessions: { ...s.sessions, [sessionId]: { ...existing, queued } },
+      };
+    }),
+
+  setReview: (sessionId, review) =>
+    set((s) => {
+      const existing = s.sessions[sessionId];
+      if (!existing) return {};
+      return {
+        sessions: {
+          ...s.sessions,
+          [sessionId]: { ...existing, review },
+        },
+      };
+    }),
+
+  setConnected: (sessionId, connected) =>
+    set((s) => {
+      const existing = s.sessions[sessionId];
+      if (!existing) return {};
+      return {
+        sessions: {
+          ...s.sessions,
+          [sessionId]: {
+            ...existing,
+            state: {
+              ...existing.state,
+              status: connected ? "idle" : "disconnected",
+            },
+          },
+        },
       };
     }),
 
@@ -271,6 +326,13 @@ export const useFleet = create<FleetStore>((set, get) => ({
             ),
           },
     ),
+
+  updateProject: (project) =>
+    set((s) => ({
+      projects: s.projects.map((existing) =>
+        existing.path === project.path ? project : existing,
+      ),
+    })),
 
   removeProject: (path) =>
     set((s) => ({ projects: s.projects.filter((p) => p.path !== path) })),
@@ -348,7 +410,7 @@ export const useFleet = create<FleetStore>((set, get) => ({
       const now = Date.now();
       for (const event of events) {
         if (event.type === "error") {
-          errors = [...(errors ?? s.errors), event.message];
+          errors = [...(errors ?? s.errors), event.message].slice(-10);
           continue;
         }
         const id = eventSessionId(event);
@@ -373,4 +435,6 @@ export const useFleet = create<FleetStore>((set, get) => ({
 
   dismissError: (index) =>
     set((s) => ({ errors: s.errors.filter((_, i) => i !== index) })),
+  reportError: (message) =>
+    set((s) => ({ errors: [...s.errors, message].slice(-10) })),
 }));

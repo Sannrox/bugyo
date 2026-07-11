@@ -30,6 +30,17 @@ pub struct Project {
     /// live on read, so it stays accurate.
     #[serde(default)]
     pub is_git_repo: bool,
+    /// Defaults applied when creating a new isolated workspace.
+    #[serde(default = "default_base_branch")]
+    pub base_branch: String,
+    #[serde(default)]
+    pub setup_script: String,
+    #[serde(default)]
+    pub check_script: String,
+}
+
+fn default_base_branch() -> String {
+    "main".to_string()
 }
 
 /// Bugyo's config home: `$BUGYO_CONFIG_HOME`, else `~/.kiro/bugyo`.
@@ -99,11 +110,39 @@ pub fn add_project(home: &Path, repo_path: &str) -> Result<Project, ConfigError>
     let project = Project {
         name: name_of(&canonical),
         is_git_repo: is_git_repo(&path),
+        base_branch: default_base_branch(),
+        setup_script: String::new(),
+        check_script: String::new(),
         path,
     };
     projects.push(project.clone());
     write_projects(home, &projects)?;
     Ok(project)
+}
+
+/// Update the workspace defaults for a registered project.
+pub fn update_project(
+    home: &Path,
+    path: &str,
+    base_branch: &str,
+    setup_script: &str,
+    check_script: &str,
+) -> Result<Project, ConfigError> {
+    let mut projects = list_projects(home)?;
+    let project = projects
+        .iter_mut()
+        .find(|project| project.path == path)
+        .ok_or_else(|| ConfigError::NotFound(path.to_string()))?;
+    project.base_branch = if base_branch.trim().is_empty() {
+        default_base_branch()
+    } else {
+        base_branch.trim().to_string()
+    };
+    project.setup_script = setup_script.trim().to_string();
+    project.check_script = check_script.trim().to_string();
+    let updated = project.clone();
+    write_projects(home, &projects)?;
+    Ok(updated)
 }
 
 /// Remove a project by path. No-op if absent.
@@ -129,6 +168,9 @@ pub struct PersistedSession {
     /// Worktree metadata, when this session is a workspace.
     #[serde(default)]
     pub workspace: Option<serde_json::Value>,
+    /// Durable workspace review/check/landing metadata.
+    #[serde(default)]
+    pub review: Option<serde_json::Value>,
     /// Name for the worker/queue files.
     pub worker_name: String,
     /// Args to (re)spawn `kiro-cli acp`.
@@ -1154,6 +1196,7 @@ mod tests {
             session_id: "s1".into(),
             repo: "/repo".into(),
             workspace: None,
+            review: None,
             worker_name: "s1".into(),
             args: vec!["acp".into()],
             command: "kiro-cli acp".into(),
@@ -1363,6 +1406,28 @@ mod tests {
         add_project(&tmp.0, repo.to_str().unwrap()).unwrap();
         add_project(&tmp.0, repo.to_str().unwrap()).unwrap();
         assert_eq!(list_projects(&tmp.0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn project_workspace_defaults_roundtrip() {
+        let tmp = Tmp::new();
+        let repo = tmp.0.join("repo");
+        make_repo(&repo);
+        let added = add_project(&tmp.0, repo.to_str().unwrap()).unwrap();
+        assert_eq!(added.base_branch, "main");
+
+        let updated = update_project(
+            &tmp.0,
+            &added.path,
+            "develop",
+            "bun install",
+            "bun run test",
+        )
+        .unwrap();
+        assert_eq!(updated.base_branch, "develop");
+        assert_eq!(updated.setup_script, "bun install");
+        assert_eq!(updated.check_script, "bun run test");
+        assert_eq!(list_projects(&tmp.0).unwrap(), vec![updated]);
     }
 
     #[test]

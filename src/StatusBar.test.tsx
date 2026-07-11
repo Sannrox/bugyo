@@ -53,4 +53,13 @@ describe("StatusBar", () => {
     fireEvent.click(screen.getByRole("button", { name: /needs approval/i }));
     expect(useFleet.getState().panel).toBe("inbox");
   });
+
+  it("does not report a stopped agent as idle", () => {
+    useFleet.getState().addSession({ sessionId: "cold", connected: false });
+
+    render(<StatusBar />);
+    const bar = screen.getByLabelText("fleet status");
+    expect(bar).toHaveTextContent("1 stopped");
+    expect(bar).toHaveTextContent("0 idle");
+  });
 });

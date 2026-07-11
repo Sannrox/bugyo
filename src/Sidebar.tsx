@@ -27,19 +27,26 @@ import {
   projectAdd,
   pickDirectory,
   messageDialog,
+  orchHeartbeatSecs,
+  orchPreview,
   workspaceArchive,
 } from "./lib/ipc";
 import { useFleet, type FleetStore } from "./lib/fleetStore";
-import type { SessionState } from "./lib/session";
 import { relativeTime } from "./lib/format";
 import { persistMeta, persistOrder } from "./lib/sessionMeta";
+import { effectiveStatus, type DisplayStatus } from "./lib/review";
 
-const DOT_CLASS: Record<SessionState["status"], string> = {
+const DOT_CLASS: Record<DisplayStatus, string> = {
   disconnected: "dot--disconnected",
   idle: "dot--idle",
   working: "dot--working",
   needsApproval: "dot--needsApproval",
   error: "dot--error",
+  needsReview: "dot--needsReview",
+  checksFailed: "dot--checksFailed",
+  readyToLand: "dot--readyToLand",
+  pullRequestOpen: "dot--pullRequestOpen",
+  merged: "dot--merged",
 };
 
 const NO_REPO = "(no repository)";
@@ -69,18 +76,26 @@ function SidebarItem({
   /** Leave rename mode without changing the name. */
   onCancelRename: () => void;
   /** Open the row's action menu at viewport coords (x, y). */
-  onContext: (sessionId: string, x: number, y: number) => void;
+  onContext: (
+    sessionId: string,
+    x: number,
+    y: number,
+    trigger: HTMLElement,
+  ) => void;
 }) {
   const label = useFleet(
     (s) =>
-      s.sessions[sessionId]?.name ??
-      s.sessions[sessionId]?.workspace?.branch ??
-      "plain session",
+      (s.sessions[sessionId]?.name ?? s.sessions[sessionId]?.workspace?.task) ||
+      s.sessions[sessionId]?.workspace?.branch ||
+      "Plain session",
   );
   const pinned = useFleet((s) => s.sessions[sessionId]?.pinned ?? false);
   const isWorkspace = useFleet((s) => s.sessions[sessionId]?.workspace != null);
-  const status = useFleet(
-    (s) => s.sessions[sessionId]?.state.status ?? "disconnected",
+  const status = useFleet((s) =>
+    effectiveStatus(
+      s.sessions[sessionId]?.state.status ?? "disconnected",
+      s.sessions[sessionId]?.review ?? null,
+    ),
   );
   const queued = useFleet((s) => s.sessions[sessionId]?.queued ?? 0);
   const lastActivity = useFleet(
@@ -124,7 +139,7 @@ function SidebarItem({
       className="sidebar__row"
       onContextMenu={(e) => {
         e.preventDefault();
-        onContext(sessionId, e.clientX, e.clientY);
+        onContext(sessionId, e.clientX, e.clientY, e.currentTarget);
       }}
     >
       <button
@@ -182,7 +197,7 @@ function SidebarItem({
         // it to the button's bottom-right corner.
         onClick={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
-          onContext(sessionId, r.right, r.bottom);
+          onContext(sessionId, r.right, r.bottom, e.currentTarget);
         }}
         aria-label="session actions"
         title="Session actions"
@@ -199,7 +214,10 @@ function SidebarItem({
 const selectStructure = (s: FleetStore) =>
   s.order.map((id) => {
     const sess = s.sessions[id];
-    const label = sess?.name ?? sess?.workspace?.branch ?? "plain session";
+    const label =
+      (sess?.name ?? sess?.workspace?.task) ||
+      sess?.workspace?.branch ||
+      "Plain session";
     const pinned = sess?.pinned ? "1" : "0";
     return `${id}${SEP}${sess?.repoRoot ?? NO_REPO}${SEP}${label}${SEP}${pinned}`;
   });
@@ -207,6 +225,8 @@ const selectStructure = (s: FleetStore) =>
 export default function Sidebar() {
   const structure = useFleet(useShallow(selectStructure));
   const projects = useFleet((s) => s.projects);
+  const activeId = useFleet((s) => s.activeId);
+  const panel = useFleet((s) => s.panel);
   const setActive = useFleet((s) => s.setActive);
   const openInbox = useFleet((s) => s.openInbox);
   const openAutomations = useFleet((s) => s.openAutomations);
@@ -235,6 +255,7 @@ export default function Sidebar() {
     sessionId: string;
     x: number;
     y: number;
+    trigger: HTMLElement;
   } | null>(null);
   // Which row (if any) is in inline-rename mode.
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -246,22 +267,45 @@ export default function Sidebar() {
     ? (useFleet.getState().sessions[menu.sessionId]?.pinned ?? false)
     : false;
 
-  function pin(sessionId: string) {
+  async function pin(sessionId: string) {
     setMenu(null);
     togglePin(sessionId);
-    void persistMeta(sessionId).catch(() => {});
+    try {
+      await persistMeta(sessionId);
+    } catch (cause) {
+      togglePin(sessionId);
+      await messageDialog(
+        `Pin change was not saved and has been reverted: ${String(cause)}`,
+      );
+    }
   }
 
-  function move(sessionId: string, dir: "up" | "down") {
+  async function move(sessionId: string, dir: "up" | "down") {
     setMenu(null);
     moveSession(sessionId, dir);
-    void persistOrder().catch(() => {});
+    try {
+      await persistOrder();
+    } catch (cause) {
+      moveSession(sessionId, dir === "up" ? "down" : "up");
+      void persistOrder().catch(() => {});
+      await messageDialog(
+        `Session order was not saved and has been reverted: ${String(cause)}`,
+      );
+    }
   }
 
-  function commitRename(sessionId: string, name: string) {
+  async function commitRename(sessionId: string, name: string) {
     setRenamingId(null);
+    const previous = useFleet.getState().sessions[sessionId]?.name ?? null;
     renameSession(sessionId, name);
-    void persistMeta(sessionId).catch(() => {});
+    try {
+      await persistMeta(sessionId);
+    } catch (cause) {
+      renameSession(sessionId, previous ?? "");
+      await messageDialog(
+        `Session name was not saved and has been reverted: ${String(cause)}`,
+      );
+    }
   }
 
   async function deleteSession(sessionId: string) {
@@ -283,8 +327,8 @@ export default function Sidebar() {
   async function archiveWorkspace(sessionId: string) {
     setMenu(null);
     const ok = await confirmDialog(
-      "Archive this workspace? This removes the git worktree and deletes its " +
-        "branch. Uncommitted changes will be discarded.",
+      "Archive this workspace? This removes the local git worktree and discards " +
+        "uncommitted changes. Git deletes a safely merged branch; an unmerged branch is retained.",
       "Archive workspace",
     );
     if (!ok) return;
@@ -354,28 +398,41 @@ export default function Sidebar() {
 
   return (
     <nav className="sidebar" aria-label="workspaces">
+      <div className="sidebar__brand" aria-label="Bugyo agent command center">
+        <span className="sidebar__brand-mark" aria-hidden>
+          奉
+        </span>
+        <span className="sidebar__brand-copy">
+          <strong>Bugyo</strong>
+          <small>Agent command</small>
+        </span>
+      </div>
+
       <button
         type="button"
-        className="sidebar__new"
+        className={`sidebar__new${panel === null && activeId === null ? " sidebar__new--active" : ""}`}
         onClick={() => setActive(null)}
+        aria-current={panel === null && activeId === null ? "page" : undefined}
       >
-        <Plus size={16} aria-hidden /> New session
+        <Plus size={16} aria-hidden /> New task
       </button>
 
       <button
         type="button"
-        className="sidebar__new"
+        className={`sidebar__new${panel === "fleet" ? " sidebar__new--active" : ""}`}
         onClick={() => openFleet()}
         aria-label="fleet overview"
+        aria-current={panel === "fleet" ? "page" : undefined}
       >
         <LayoutGrid size={16} aria-hidden /> Fleet
       </button>
 
       <button
         type="button"
-        className="sidebar__new"
+        className={`sidebar__new${panel === "inbox" ? " sidebar__new--active" : ""}`}
         onClick={() => openInbox()}
         aria-label="attention inbox"
+        aria-current={panel === "inbox" ? "page" : undefined}
       >
         <Inbox size={16} aria-hidden /> Attention
         {attention > 0 && (
@@ -390,9 +447,10 @@ export default function Sidebar() {
 
       <button
         type="button"
-        className="sidebar__new"
+        className={`sidebar__new${panel === "automations" ? " sidebar__new--active" : ""}`}
         onClick={() => openAutomations()}
         aria-label="automations"
+        aria-current={panel === "automations" ? "page" : undefined}
       >
         <Clock size={16} aria-hidden /> Automations
       </button>
@@ -434,7 +492,9 @@ export default function Sidebar() {
                     renaming={renamingId === id}
                     onCommitRename={(name) => commitRename(id, name)}
                     onCancelRename={() => setRenamingId(null)}
-                    onContext={(sid, x, y) => setMenu({ sessionId: sid, x, y })}
+                    onContext={(sid, x, y, trigger) =>
+                      setMenu({ sessionId: sid, x, y, trigger })
+                    }
                   />
                 ))}
               </ul>
@@ -448,19 +508,21 @@ export default function Sidebar() {
       <div className="sidebar__corner">
         <button
           type="button"
-          className="sidebar__corner-btn"
+          className={`sidebar__corner-btn${panel === "eventlog" ? " sidebar__corner-btn--active" : ""}`}
           onClick={() => openEventLog()}
           aria-label="event log"
           title="Event log"
+          aria-current={panel === "eventlog" ? "page" : undefined}
         >
           <ScrollText size={16} aria-hidden />
         </button>
         <button
           type="button"
-          className="sidebar__corner-btn"
+          className={`sidebar__corner-btn${panel === "settings" ? " sidebar__corner-btn--active" : ""}`}
           onClick={() => openSettings()}
           aria-label="settings"
           title="Settings"
+          aria-current={panel === "settings" ? "page" : undefined}
         >
           <SettingsIcon size={16} aria-hidden />
         </button>
@@ -482,7 +544,13 @@ export default function Sidebar() {
           onMoveDown={() => move(menu.sessionId, "down")}
           onDelete={() => void deleteSession(menu.sessionId)}
           onArchive={() => void archiveWorkspace(menu.sessionId)}
-          onClose={() => setMenu(null)}
+          onClose={() => {
+            const trigger = menu.trigger;
+            setMenu(null);
+            queueMicrotask(() => {
+              if (trigger.isConnected) trigger.focus();
+            });
+          }}
         />
       )}
     </nav>
@@ -641,10 +709,18 @@ function SessionContextMenu({
 
 /** Live fleet activity summary: how many sessions are working/queued/idle. */
 function ActivityFooter() {
+  const heartbeat = useFleet((state) => state.heartbeat);
+  const [intervalSecs, setIntervalSecs] = useState(10);
+  const [seconds, setSeconds] = useState(10);
+  const [nextDispatch, setNextDispatch] = useState<{
+    sessionId: string;
+    task: string;
+  } | null>(null);
   const activity = useFleet(
     useShallow((s) => {
       let working = 0;
       let idle = 0;
+      let stopped = 0;
       let attention = 0;
       let queued = 0;
       for (const x of Object.values(s.sessions)) {
@@ -655,11 +731,58 @@ function ActivityFooter() {
           x.state.status === "error"
         )
           attention += 1;
+        else if (x.state.status === "disconnected") stopped += 1;
         else idle += 1;
       }
-      return { total: s.order.length, working, idle, attention, queued };
+      return {
+        total: s.order.length,
+        working,
+        idle,
+        stopped,
+        attention,
+        queued,
+      };
     }),
   );
+
+  async function refreshPreview() {
+    try {
+      const report = await orchPreview();
+      setNextDispatch(report.dispatched[0] ?? null);
+    } catch {
+      setNextDispatch(null);
+    }
+  }
+
+  useEffect(() => {
+    void orchHeartbeatSecs()
+      .then((value) => {
+        setIntervalSecs(value);
+        setSeconds(value);
+      })
+      .catch(() => {});
+    void refreshPreview();
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(
+      () => setSeconds((current) => Math.max(0, current - 1)),
+      1000,
+    );
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (seconds !== 0) return;
+    setSeconds(intervalSecs);
+    void refreshPreview();
+  }, [intervalSecs, seconds]);
+
+  useEffect(() => {
+    if (!heartbeat) return;
+    setSeconds(intervalSecs);
+    void refreshPreview();
+  }, [heartbeat, intervalSecs]);
 
   return (
     <div className="sidebar__footer" aria-label="fleet activity">
@@ -672,10 +795,26 @@ function ActivityFooter() {
         <p className="muted">
           {activity.working} working · {activity.queued} queued ·{" "}
           {activity.idle} idle
+          {activity.stopped > 0 && <> · {activity.stopped} stopped</>}
           {activity.attention > 0 && (
             <> · {activity.attention} need attention</>
           )}
         </p>
+      )}
+      {activity.total > 0 && (
+        <button
+          type="button"
+          className="sidebar__heartbeat"
+          onClick={() => void refreshPreview()}
+          title="Refresh the dry-run heartbeat decision"
+        >
+          <Clock size={11} aria-hidden /> {seconds}s ·{" "}
+          {nextDispatch
+            ? `Next: ${nextDispatch.task}`
+            : activity.queued > 0
+              ? "Queued work is waiting for capacity"
+              : "No queued dispatch"}
+        </button>
       )}
     </div>
   );

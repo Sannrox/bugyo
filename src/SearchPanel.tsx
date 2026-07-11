@@ -9,17 +9,18 @@ interface Group {
   sessionId: string;
   name: string;
   isWorkspace: boolean;
+  available: boolean;
   hits: SearchHit[];
 }
 
 function sessionName(sess: {
   name?: string | null;
-  workspace?: { branch: string } | null;
+  workspace?: { task: string; branch: string } | null;
   sessionId: string;
 }): string {
   return (
-    sess.name ??
-    sess.workspace?.branch ??
+    (sess.name ?? sess.workspace?.task) ||
+    sess.workspace?.branch ||
     `session ${sess.sessionId.slice(0, 8)}`
   );
 }
@@ -35,6 +36,7 @@ export default function SearchPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const searchVersion = useRef(0);
   const setActive = useFleet((s) => s.setActive);
   const sessions = useFleet((s) => s.sessions);
   const order = useFleet((s) => s.order);
@@ -43,15 +45,19 @@ export default function SearchPanel() {
     e.preventDefault();
     const q = query.trim();
     if (!q) return;
+    const version = ++searchVersion.current;
     setBusy(true);
     setError("");
     try {
-      setHits(await sessionSearch(q));
+      const next = await sessionSearch(q);
+      if (searchVersion.current === version) setHits(next);
     } catch (err) {
-      setError(String(err));
-      setHits([]);
+      if (searchVersion.current === version) {
+        setError(String(err));
+        setHits([]);
+      }
     } finally {
-      setBusy(false);
+      if (searchVersion.current === version) setBusy(false);
     }
   }
 
@@ -85,6 +91,7 @@ export default function SearchPanel() {
         sessionId,
         name: sess ? sessionName(sess) : `session ${sessionId.slice(0, 8)}`,
         isWorkspace: sess?.workspace != null,
+        available: Boolean(sess),
         hits: list,
       };
     });
@@ -101,10 +108,16 @@ export default function SearchPanel() {
           aria-label="search query"
           placeholder="Filter sessions, or press Enter to search transcripts…"
           value={query}
-          onChange={(e) => setQuery(e.currentTarget.value)}
+          onChange={(e) => {
+            searchVersion.current += 1;
+            setQuery(e.currentTarget.value);
+            setHits(null);
+            setError("");
+            setBusy(false);
+          }}
         />
         <button type="submit" disabled={busy || !query.trim()}>
-          Search transcripts
+          {busy ? "Searching…" : "Search transcripts"}
         </button>
       </form>
 
@@ -138,6 +151,12 @@ export default function SearchPanel() {
         </section>
       )}
 
+      {q && sessionMatches.length === 0 && hits === null && (
+        <p className="muted search__empty">
+          No session names match. Press Enter to search transcript content.
+        </p>
+      )}
+
       {/* Transcript content matches */}
       {hits !== null && !busy && groups.length === 0 && !error && (
         <p className="muted search__empty">No transcript matches.</p>
@@ -155,16 +174,36 @@ export default function SearchPanel() {
                     type="button"
                     className="search__group-head"
                     onClick={() => setActive(g.sessionId)}
+                    disabled={!g.available}
+                    title={
+                      g.available
+                        ? "Open session"
+                        : "This transcript belongs to a session that is no longer in the fleet"
+                    }
                   >
                     <Icon size={14} aria-hidden />
                     <span className="search__group-name">{g.name}</span>
                     <span className="muted">{g.hits.length}</span>
+                    {!g.available && (
+                      <span className="search__unavailable">Archived</span>
+                    )}
                   </button>
                   <ul className="search__hits">
                     {g.hits.map((h) => (
-                      <li key={`${h.index}-${h.kind}`} className="search__hit">
-                        <span className="search__hit-kind muted">{h.kind}</span>
-                        <span className="search__hit-snippet">{h.snippet}</span>
+                      <li key={`${h.index}-${h.kind}`}>
+                        <button
+                          type="button"
+                          className="search__hit"
+                          onClick={() => setActive(g.sessionId)}
+                          disabled={!g.available}
+                        >
+                          <span className="search__hit-kind muted">
+                            {h.kind}
+                          </span>
+                          <span className="search__hit-snippet">
+                            {h.snippet}
+                          </span>
+                        </button>
                       </li>
                     ))}
                   </ul>

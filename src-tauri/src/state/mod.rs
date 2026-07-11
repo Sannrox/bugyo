@@ -164,6 +164,22 @@ pub fn read_queue(home: &Path, name: &str) -> Result<Vec<String>, StateError> {
     Ok(tasks)
 }
 
+/// Replace a worker's queue atomically with the supplied ordered tasks.
+pub fn replace_queue(home: &Path, name: &str, tasks: &[String]) -> Result<(), StateError> {
+    let dir = queue_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    let mut content = String::new();
+    for task in tasks.iter().filter(|task| !task.trim().is_empty()) {
+        content.push_str(&format!(
+            "{{\"ts\":{},\"task\":{}}}\n",
+            serde_json::to_string(&now_ts())?,
+            serde_json::to_string(task.trim())?
+        ));
+    }
+    std::fs::write(queue_file(home, name), content)?;
+    Ok(())
+}
+
 /// Remove the first queued task (consume), rewriting the file. Returns it.
 pub fn pop_queue(home: &Path, name: &str) -> Result<Option<String>, StateError> {
     let path = queue_file(home, name);
@@ -298,6 +314,14 @@ mod tests {
         assert_eq!(pop_queue(&tmp.0, "w").unwrap(), Some("two".into()));
         assert_eq!(read_queue(&tmp.0, "w").unwrap(), Vec::<String>::new());
         assert_eq!(pop_queue(&tmp.0, "w").unwrap(), None);
+    }
+
+    #[test]
+    fn queue_replace_preserves_explicit_order_and_drops_blanks() {
+        let tmp = Tmp::new();
+        append_queue(&tmp.0, "w", "old").unwrap();
+        replace_queue(&tmp.0, "w", &[" second ".into(), "".into(), "first".into()]).unwrap();
+        assert_eq!(read_queue(&tmp.0, "w").unwrap(), vec!["second", "first"]);
     }
 
     #[test]

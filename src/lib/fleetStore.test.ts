@@ -3,6 +3,7 @@ import { useFleet } from "./fleetStore";
 import type { Workspace } from "./bindings";
 
 const ws = (branch: string, repo: string): Workspace => ({
+  task: branch,
   repoRoot: repo,
   baseBranch: "main",
   branch,
@@ -32,6 +33,14 @@ describe("fleetStore", () => {
     expect(s.activeId).toBe("b");
     expect(s.sessions.a.repoRoot).toBe("/repo1");
     expect(s.sessions.a.state.status).toBe("idle");
+  });
+
+  it("keeps startup-hydrated sessions visibly disconnected until resumed", () => {
+    useFleet.getState().addSession({ sessionId: "cold", connected: false });
+    expect(useFleet.getState().sessions.cold.state.status).toBe("disconnected");
+
+    useFleet.getState().setConnected("cold", true);
+    expect(useFleet.getState().sessions.cold.state.status).toBe("idle");
   });
 
   it("routes events to the correct session only", () => {
@@ -163,6 +172,18 @@ describe("fleetStore", () => {
     expect(useFleet.getState().activeId).toBe("b");
   });
 
+  it("clears the split when opening the new-task composer", () => {
+    const { addSession, setActive, openSplit } = useFleet.getState();
+    addSession({ sessionId: "a" });
+    addSession({ sessionId: "b" });
+    setActive("a");
+    openSplit("b");
+    setActive(null);
+    expect(useFleet.getState().activeId).toBeNull();
+    expect(useFleet.getState().secondaryId).toBeNull();
+    expect(useFleet.getState().panel).toBeNull();
+  });
+
   it("clears the split when the split session is removed", () => {
     const { addSession, setActive, openSplit, removeSession } =
       useFleet.getState();
@@ -272,5 +293,16 @@ describe("fleetStore", () => {
     expect(s.errors).toEqual(["boom"]);
     const last = s.sessions.a.state.transcript.at(-1);
     expect(last).toEqual({ kind: "agent", text: "hi" });
+  });
+
+  it("bounds explicitly reported backend errors", () => {
+    const { reportError } = useFleet.getState();
+    for (let index = 0; index < 12; index += 1) {
+      reportError(`failure ${index}`);
+    }
+
+    expect(useFleet.getState().errors).toHaveLength(10);
+    expect(useFleet.getState().errors[0]).toBe("failure 2");
+    expect(useFleet.getState().errors.at(-1)).toBe("failure 11");
   });
 });

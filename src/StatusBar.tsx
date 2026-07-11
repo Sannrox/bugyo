@@ -1,5 +1,6 @@
 import { useShallow } from "zustand/react/shallow";
 import { useFleet } from "./lib/fleetStore";
+import { effectiveStatus } from "./lib/review";
 
 /**
  * A persistent one-line fleet summary shown at the bottom of the main area:
@@ -13,12 +14,15 @@ export default function StatusBar() {
     useShallow((s) => {
       let working = 0;
       let idle = 0;
+      let stopped = 0;
       let needsApproval = 0;
       let error = 0;
+      let review = 0;
       let credits = 0;
       for (const x of Object.values(s.sessions)) {
         credits += x.state.credits;
-        switch (x.state.status) {
+        const status = effectiveStatus(x.state.status, x.review);
+        switch (status) {
           case "working":
             working += 1;
             break;
@@ -28,16 +32,26 @@ export default function StatusBar() {
           case "error":
             error += 1;
             break;
+          case "disconnected":
+            stopped += 1;
+            break;
+          case "needsReview":
+          case "checksFailed":
+          case "readyToLand":
+            review += 1;
+            break;
           default:
-            idle += 1; // idle + disconnected
+            idle += 1;
         }
       }
       return {
         total: s.order.length,
         working,
         idle,
+        stopped,
         needsApproval,
         error,
+        review,
         credits,
       };
     }),
@@ -59,6 +73,14 @@ export default function StatusBar() {
         </span>{" "}
         {stats.idle} idle
       </span>
+      {stats.stopped > 0 && (
+        <span className="statusbar__item">
+          <span className="dot dot--disconnected" aria-hidden>
+            ●
+          </span>{" "}
+          {stats.stopped} stopped
+        </span>
+      )}
       <button
         type="button"
         className="statusbar__item statusbar__attn"
@@ -81,6 +103,14 @@ export default function StatusBar() {
             ●
           </span>{" "}
           {stats.error} error
+        </span>
+      )}
+      {stats.review > 0 && (
+        <span className="statusbar__item">
+          <span className="dot dot--needsReview" aria-hidden>
+            ●
+          </span>{" "}
+          {stats.review} review
         </span>
       )}
       <span className="statusbar__spacer" />

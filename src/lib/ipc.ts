@@ -30,6 +30,7 @@ import type {
   SessionMeta,
   TrustProfile,
   WorkspaceCreateArgs,
+  WorkspaceReviewState,
   WorkspaceSession,
 } from "./bindings";
 import type { TranscriptEntry } from "./session";
@@ -52,7 +53,7 @@ export function ping(name: string): Promise<PingResponse> {
 export interface StartSessionOptions {
   /** Working directory for the session (defaults to the backend cwd). */
   cwd?: string;
-  /** Auto-approve all tool calls (`--trust-all-tools`). */
+  /** Legacy compatibility only. The backend safely ignores trust-all. */
   trustAll?: boolean;
   /** Trust only these tools (`--trust-tools`). Ignored if `trustAll`. */
   trustTools?: string[];
@@ -95,12 +96,27 @@ export function workspaceDiff(sessionId: string): Promise<string> {
   return invoke<string>("workspace_diff", { sessionId });
 }
 
+/** Durable review/check/landing state derived from the live git workspace. */
+export function workspaceReviewState(
+  sessionId: string,
+): Promise<WorkspaceReviewState> {
+  return invoke<WorkspaceReviewState>("workspace_review_state", { sessionId });
+}
+
 /** Run a check/run script in the workspace; returns pass/fail + output. */
 export function workspaceCheck(
   sessionId: string,
   script: string,
 ): Promise<CheckResult> {
   return invoke<CheckResult>("workspace_check", { sessionId, script });
+}
+
+/** Stage and commit every reviewed workspace change. */
+export function workspaceCommit(
+  sessionId: string,
+  message: string,
+): Promise<void> {
+  return invoke<void>("workspace_commit", { sessionId, message });
 }
 
 /** Merge the workspace branch into the base repo's current branch. */
@@ -146,6 +162,19 @@ export function orchEnqueue(sessionId: string, text: string): Promise<void> {
   return invoke<void>("orch_enqueue", { sessionId, text });
 }
 
+/** Read queued prompts in their dispatch order. */
+export function orchQueue(sessionId: string): Promise<string[]> {
+  return invoke<string[]>("orch_queue", { sessionId });
+}
+
+/** Save an explicitly ordered queue for a session. */
+export function orchQueueReplace(
+  sessionId: string,
+  tasks: string[],
+): Promise<void> {
+  return invoke<void>("orch_queue_replace", { sessionId, tasks });
+}
+
 /** Dry-run: what the next heartbeat pass would dispatch. */
 export function orchPreview(): Promise<HeartbeatReport> {
   return invoke<HeartbeatReport>("orch_preview");
@@ -169,6 +198,16 @@ export function projectList(): Promise<Project[]> {
 /** Register a project by repository path (must be a git repo). */
 export function projectAdd(path: string): Promise<Project> {
   return invoke<Project>("project_add", { path });
+}
+
+/** Save workspace defaults for a registered project. */
+export function projectUpdate(project: Project): Promise<Project> {
+  return invoke<Project>("project_update", {
+    path: project.path,
+    baseBranch: project.baseBranch,
+    setupScript: project.setupScript,
+    checkScript: project.checkScript,
+  });
 }
 
 /** Remove a registered project by path. */

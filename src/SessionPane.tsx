@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArrowUp,
@@ -6,9 +6,11 @@ import {
   Camera,
   Copy,
   GitBranch,
+  MoreHorizontal,
   RotateCcw,
   Square,
   SquareTerminal,
+  X,
 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -24,17 +26,11 @@ import {
 import { projectName } from "./lib/format";
 import { useFleet } from "./lib/fleetStore";
 import { useSettings } from "./lib/settingsStore";
+import { DISPLAY_STATUS_LABEL, effectiveStatus } from "./lib/review";
 import type { TranscriptEntry } from "./lib/session";
 import ReviewPanel from "./ReviewPanel";
+import QueuePanel from "./QueuePanel";
 import { InlineDiff } from "./DiffView";
-
-const STATUS_LABEL = {
-  disconnected: "Disconnected",
-  idle: "Idle",
-  working: "Working…",
-  needsApproval: "Needs approval",
-  error: "Error",
-} as const;
 
 type ToolEntry = Extract<TranscriptEntry, { kind: "tool" }>;
 
@@ -156,15 +152,64 @@ function ToolGroup({ tools }: { tools: ToolEntry[] }) {
 export default function SessionPane({ sessionId }: { sessionId: string }) {
   // Subscribe only to this session — a busy sibling won't re-render this pane.
   const session = useFleet((s) => s.sessions[sessionId]);
+  const state = session?.state;
   const projects = useFleet((s) => s.projects);
-  const setActive = useFleet((s) => s.setActive);
-  const isSecondary = useFleet((s) => s.secondaryId === sessionId);
+  const setConnected = useFleet((s) => s.setConnected);
+  const setQueued = useFleet((s) => s.setQueued);
+  const splitOpen = useFleet((s) => s.secondaryId !== null);
   const closeSplit = useFleet((s) => s.closeSplit);
   const showReasoning = useSettings((s) => s.showReasoning);
   const toolDisplay = useSettings((s) => s.toolDisplay);
   const appendUserMessage = useFleet((s) => s.appendUserMessage);
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState("");
+  const [permissionBusy, setPermissionBusy] = useState(false);
+  const [permissionChoice, setPermissionChoice] = useState("");
+  const [permissionError, setPermissionError] = useState("");
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const moreMenuListRef = useRef<HTMLDivElement>(null);
+  const restoreMoreFocus = useRef(false);
+
+  useEffect(() => {
+    setPermissionBusy(false);
+    setPermissionChoice("");
+    setPermissionError("");
+  }, [state?.pendingPermission?.requestId]);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    moreMenuListRef.current
+      ?.querySelector<HTMLButtonElement>("button")
+      ?.focus();
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!moreMenuRef.current?.contains(event.target as Node)) {
+        setMoreOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        restoreMoreFocus.current = true;
+        setMoreOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [moreOpen]);
+
+  useLayoutEffect(() => {
+    if (moreOpen || !restoreMoreFocus.current) return;
+    restoreMoreFocus.current = false;
+    moreButtonRef.current?.focus();
+  }, [moreOpen]);
+  const reviewAutoOpened = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Whether the transcript is pinned to the bottom (so new content auto-scrolls
@@ -174,7 +219,18 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
 
-  const state = session?.state;
+  useEffect(() => {
+    if (
+      reviewAutoOpened.current ||
+      !session?.workspace ||
+      session.review?.stage !== "readyToLand" ||
+      state?.status === "working"
+    ) {
+      return;
+    }
+    reviewAutoOpened.current = true;
+    setReviewOpen(true);
+  }, [session?.review?.stage, session?.workspace, state?.status]);
 
   // Grouped, settings-filtered transcript blocks (memoized so the virtualizer
   // gets a stable list and streaming chunks don't re-group on every render).
@@ -271,11 +327,15 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   }
 
   const busy = state.status === "working" || state.status === "needsApproval";
+  const displayStatus = effectiveStatus(state.status, session.review);
 
   // Header identity: friendly project name (if the session belongs to a repo)
   // plus the session's own name (its worktree branch, or "Plain session").
   const project = projectName(session.repoRoot, projects);
-  const sessionName = session.workspace?.branch ?? "Plain session";
+  const sessionName =
+    (session.name ?? session.workspace?.task) ||
+    session.workspace?.branch ||
+    "Plain session";
 
   // ---- Slash-command palette (mirrors kiro-cli's own `/` palette) ----------
   // Skills surface as prompts (serverName "skill:config"); commands carry the
@@ -427,23 +487,27 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   }
 
   async function respond(optionId: string) {
-    if (!state?.pendingPermission) return;
+    if (!state?.pendingPermission || permissionBusy) return;
     try {
-      setError("");
+      setPermissionBusy(true);
+      setPermissionChoice(optionId);
+      setPermissionError("");
       await acpRespondPermission(
         sessionId,
         state.pendingPermission.requestId,
         optionId,
       );
     } catch (e) {
-      setError(String(e));
+      setPermissionBusy(false);
+      setPermissionChoice("");
+      setPermissionError(String(e));
     }
   }
 
   async function closeSession() {
     try {
       await acpCloseSession(sessionId);
-      setActive(null);
+      setConnected(sessionId, false);
     } catch (e) {
       setError(String(e));
     }
@@ -553,7 +617,7 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
           )}
         </span>
         <span role="status" aria-label="session status" className="badge">
-          {STATUS_LABEL[state.status]}
+          {DISPLAY_STATUS_LABEL[displayStatus]}
         </span>
         {session.queued > 0 && (
           <span className="badge" aria-label="queued tasks">
@@ -571,278 +635,431 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
           </span>
         )}
         <div className="pane__actions">
-          {isSecondary && (
+          {splitOpen && (
             <button
               type="button"
-              className="pane__action"
-              onClick={() => closeSplit()}
-              title="Close the split view"
+              className="pane__action pane__action--icon"
+              onClick={() => {
+                setMoreOpen(false);
+                closeSplit();
+              }}
+              aria-label="Close split view"
+              title="Close split view"
             >
-              Unsplit
+              <X size={17} aria-hidden />
+            </button>
+          )}
+          {state.status !== "disconnected" && (
+            <button
+              type="button"
+              className="pane__action pane__action--stop"
+              onClick={() => void closeSession()}
+              aria-label="Stop agent"
+              title="Stop agent and keep the session resumable"
+            >
+              <Square size={14} aria-hidden />
+              <span>Stop</span>
+            </button>
+          )}
+          {session.workspace && (
+            <button
+              type="button"
+              className={`pane__action${reviewOpen ? " pane__action--active" : ""}`}
+              onClick={() => {
+                setMoreOpen(false);
+                setQueueOpen(false);
+                setReviewOpen((open) => !open);
+              }}
+            >
+              {reviewOpen ? "Hide review" : "Review"}
             </button>
           )}
           <button
             type="button"
-            className="pane__action"
-            onClick={() => void closeSession()}
-            title="Release the process; keep the session (resumable)"
+            className={`pane__action${queueOpen ? " pane__action--active" : ""}`}
+            onClick={() => {
+              setMoreOpen(false);
+              setReviewOpen(false);
+              setQueueOpen((open) => !open);
+            }}
           >
-            Close
+            {queueOpen
+              ? "Back to session"
+              : `Queue${session.queued > 0 ? ` (${session.queued})` : ""}`}
           </button>
+          <div className="pane__more" ref={moreMenuRef}>
+            <button
+              ref={moreButtonRef}
+              type="button"
+              className="pane__action"
+              aria-label="more session actions"
+              title="More session actions"
+              aria-expanded={moreOpen}
+              onClick={() => setMoreOpen((open) => !open)}
+            >
+              <MoreHorizontal size={17} aria-hidden />
+            </button>
+            {moreOpen && (
+              <div
+                ref={moreMenuListRef}
+                className="pane__more-menu"
+                role="menu"
+                aria-label="session actions"
+                onKeyDown={(event) => {
+                  const items = Array.from(
+                    event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                      "button:not(:disabled)",
+                    ),
+                  );
+                  const current = items.indexOf(
+                    document.activeElement as HTMLButtonElement,
+                  );
+                  let next: number;
+                  if (event.key === "ArrowDown")
+                    next = (current + 1) % items.length;
+                  else if (event.key === "ArrowUp")
+                    next = (current - 1 + items.length) % items.length;
+                  else if (event.key === "Home") next = 0;
+                  else if (event.key === "End") next = items.length - 1;
+                  else return;
+                  event.preventDefault();
+                  items[next]?.focus();
+                }}
+              >
+                {splitOpen && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMoreOpen(false);
+                      closeSplit();
+                    }}
+                    title="Close the split view"
+                  >
+                    Close split view
+                  </button>
+                )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    void closeSession();
+                  }}
+                  title="Release the process; keep the session resumable"
+                  disabled={state.status === "disconnected"}
+                >
+                  {state.status === "disconnected"
+                    ? "Agent already stopped"
+                    : "Stop agent"}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
+      {queueOpen && (
+        <div className="queue-page">
+          <QueuePanel
+            sessionId={sessionId}
+            onSaved={(depth) => setQueued(sessionId, depth)}
+          />
+        </div>
+      )}
+
       <div
-        className="chat"
-        aria-label="transcript"
-        ref={scrollRef}
-        onScroll={handleScroll}
+        className={`pane__workspace${reviewOpen ? " pane__workspace--review" : ""}`}
       >
-        {session.workspace && (
-          <p className="chat__cwd muted">{session.workspace.worktreePath}</p>
-        )}
-        {state.transcript.length === 0 && (
-          <p className="chat__empty muted">
-            No messages yet. Ask the agent below to get started.
-          </p>
-        )}
-        <div
-          style={{
-            height: `${virtualizer.getTotalSize()}px`,
-            position: "relative",
-            width: "100%",
-          }}
-        >
-          {virtualizer.getVirtualItems().length === 0 && blocks.length > 0
-            ? // Fallback for environments without a layout engine (e.g. jsdom
-              // tests): the virtualizer can't measure and yields no items, so
-              // render the full list rather than hiding content. Real browsers
-              // measure and take the virtualized path below.
-              blocks.map((block, i) => (
-                <div
-                  key={
-                    block.kind === "toolGroup"
-                      ? `tg-${block.id}-${i}`
-                      : `e-${i}`
-                  }
-                >
-                  {renderBlock(block, i)}
-                </div>
-              ))
-            : virtualizer.getVirtualItems().map((vi) => (
-                <div
-                  key={vi.key}
-                  data-index={vi.index}
-                  ref={virtualizer.measureElement}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    transform: `translateY(${vi.start}px)`,
-                  }}
-                >
-                  {renderBlock(blocks[vi.index], vi.index)}
-                </div>
-              ))}
-        </div>
-      </div>
+        <div className="pane__conversation">
+          {state.status === "disconnected" && !queueOpen && (
+            <div className="pane__recovery" role="status">
+              <strong>Agent is stopped.</strong> Review remains available, and
+              sending the next prompt will start a fresh ACP process and resume
+              this session.
+            </div>
+          )}
 
-      {state.pendingPermission && (
-        <div
-          role="alertdialog"
-          aria-label="permission request"
-          className="permission"
-        >
-          <p>
-            <strong>Permission requested:</strong>{" "}
-            {state.pendingPermission.title}
-          </p>
-          <div className="permission__actions">
-            {state.pendingPermission.options.map((opt) => (
-              <button
-                key={opt.optionId}
-                type="button"
-                className={`permission__btn permission__btn--${opt.kind}`}
-                onClick={() => void respond(opt.optionId)}
-              >
-                {opt.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {session.workspace && <ReviewPanel sessionId={sessionId} />}
-
-      {(caps.tools.length > 0 ||
-        caps.mcpServers.length > 0 ||
-        caps.subagents.length > 0) && (
-        <details className="caps">
-          <summary>
-            Capabilities
-            <span className="muted">
-              {" "}
-              · {caps.tools.length} tools · {caps.mcpServers.length} MCP ·{" "}
-              {caps.subagents.length} subagents
-            </span>
-          </summary>
-          <div className="caps__body">
-            {caps.tools.length > 0 && (
-              <section className="caps__group" aria-label="tools">
-                <h4>Tools</h4>
-                <ul>
-                  {caps.tools.map((t) => (
-                    <li key={t.name}>
-                      <code>{t.name}</code>
-                      {t.source && <span className="muted"> · {t.source}</span>}
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-            {caps.mcpServers.length > 0 && (
-              <section className="caps__group" aria-label="MCP servers">
-                <h4>MCP servers</h4>
-                <ul>
-                  {caps.mcpServers.map((m) => (
-                    <li key={m.name}>
-                      <code>{m.name}</code>
-                      <span className="muted">
-                        {m.status ? ` · ${m.status}` : ""}
-                        {m.toolCount != null ? ` · ${m.toolCount} tools` : ""}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-            {caps.subagents.length > 0 && (
-              <section className="caps__group" aria-label="subagents">
-                <h4>Subagents</h4>
-                <ul>
-                  {caps.subagents.map((s) => (
-                    <li key={s.name}>
-                      <code>{s.name}</code>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-          </div>
-        </details>
-      )}
-
-      <form
-        className="chatbox"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void sendPrompt();
-        }}
-      >
-        {paletteOpen && (
-          <ul
-            id="session-palette"
-            className="palette"
-            role="listbox"
-            aria-label="commands and prompts"
+          <div
+            className="chat"
+            aria-label="transcript"
+            ref={scrollRef}
+            onScroll={handleScroll}
           >
-            {paletteItems.map((item, i) => (
-              <li
-                key={`${item.kind}:${item.name}`}
-                id={`palette-opt-${i}`}
-                role="option"
-                aria-selected={i === paletteActive}
-                className={`palette__option${
-                  i === paletteActive ? " palette__option--active" : ""
-                }`}
-                // onMouseDown (not onClick) so the textarea doesn't blur first.
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  selectPaletteItem(item);
-                }}
-              >
-                <span className="palette__name">{item.name}</span>
-                {item.kind === "prompt" && (
-                  <span className="palette__tag">prompt/skill</span>
+            {session.workspace && (
+              <p className="chat__cwd muted">
+                {session.workspace.worktreePath}
+              </p>
+            )}
+            {state.transcript.length === 0 && (
+              <p className="chat__empty muted">
+                No messages yet. Ask the agent below to get started.
+              </p>
+            )}
+            <div
+              style={{
+                height: `${virtualizer.getTotalSize()}px`,
+                position: "relative",
+                width: "100%",
+              }}
+            >
+              {virtualizer.getVirtualItems().length === 0 && blocks.length > 0
+                ? // Fallback for environments without a layout engine (e.g. jsdom
+                  // tests): the virtualizer can't measure and yields no items, so
+                  // render the full list rather than hiding content. Real browsers
+                  // measure and take the virtualized path below.
+                  blocks.map((block, i) => (
+                    <div
+                      key={
+                        block.kind === "toolGroup"
+                          ? `tg-${block.id}-${i}`
+                          : `e-${i}`
+                      }
+                    >
+                      {renderBlock(block, i)}
+                    </div>
+                  ))
+                : virtualizer.getVirtualItems().map((vi) => (
+                    <div
+                      key={vi.key}
+                      data-index={vi.index}
+                      ref={virtualizer.measureElement}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        transform: `translateY(${vi.start}px)`,
+                      }}
+                    >
+                      {renderBlock(blocks[vi.index], vi.index)}
+                    </div>
+                  ))}
+            </div>
+          </div>
+
+          {state.pendingPermission && (
+            <div
+              role="alert"
+              aria-live="assertive"
+              aria-label="permission request"
+              className="permission"
+            >
+              <p>
+                <strong>Permission requested:</strong>{" "}
+                {state.pendingPermission.title}
+              </p>
+              <div className="permission__actions">
+                {state.pendingPermission.options.map((opt) => (
+                  <button
+                    key={opt.optionId}
+                    type="button"
+                    className={`permission__btn permission__btn--${opt.kind}`}
+                    disabled={permissionBusy}
+                    onClick={() => void respond(opt.optionId)}
+                  >
+                    {permissionChoice === opt.optionId
+                      ? "Decision sent…"
+                      : opt.name}
+                  </button>
+                ))}
+              </div>
+              {permissionBusy && (
+                <p className="permission__state" role="status">
+                  Waiting for the agent to continue…
+                </p>
+              )}
+              {permissionError && (
+                <p className="error" role="alert">
+                  {permissionError} — choose again to retry.
+                </p>
+              )}
+            </div>
+          )}
+
+          {(caps.tools.length > 0 ||
+            caps.mcpServers.length > 0 ||
+            caps.subagents.length > 0) && (
+            <details className="caps">
+              <summary>
+                Capabilities
+                <span className="muted">
+                  {" "}
+                  · {caps.tools.length} tools · {caps.mcpServers.length} MCP ·{" "}
+                  {caps.subagents.length} subagents
+                </span>
+              </summary>
+              <div className="caps__body">
+                {caps.tools.length > 0 && (
+                  <section className="caps__group" aria-label="tools">
+                    <h4>Tools</h4>
+                    <ul>
+                      {caps.tools.map((t) => (
+                        <li key={t.name}>
+                          <code>{t.name}</code>
+                          {t.source && (
+                            <span className="muted"> · {t.source}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 )}
-                {item.description && (
-                  <span className="palette__desc">{item.description}</span>
+                {caps.mcpServers.length > 0 && (
+                  <section className="caps__group" aria-label="MCP servers">
+                    <h4>MCP servers</h4>
+                    <ul>
+                      {caps.mcpServers.map((m) => (
+                        <li key={m.name}>
+                          <code>{m.name}</code>
+                          <span className="muted">
+                            {m.status ? ` · ${m.status}` : ""}
+                            {m.toolCount != null
+                              ? ` · ${m.toolCount} tools`
+                              : ""}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 )}
-              </li>
-            ))}
-            <li className="palette__foot" aria-hidden="true">
-              ↑↓ navigate · ↵ select · esc cancel
-            </li>
-          </ul>
-        )}
-        <textarea
-          ref={inputRef}
-          className="chatbox__input"
-          aria-label="prompt"
-          role="combobox"
-          aria-expanded={paletteOpen}
-          aria-controls="session-palette"
-          aria-activedescendant={
-            paletteOpen ? `palette-opt-${paletteActive}` : undefined
-          }
-          autoComplete="off"
-          rows={1}
-          placeholder={
-            busy
-              ? "Queue a follow-up… (/ for commands)"
-              : "Ask for changes… (/ for commands)"
-          }
-          value={prompt}
-          onChange={(e) => {
-            setPrompt(e.currentTarget.value);
-            setPaletteDismissed(false);
-            setPaletteIndex(0);
-          }}
-          onKeyDown={(e) => {
-            if (handlePaletteKey(e)) return;
-            if (e.key === "Enter" && !e.shiftKey) {
+                {caps.subagents.length > 0 && (
+                  <section className="caps__group" aria-label="subagents">
+                    <h4>Subagents</h4>
+                    <ul>
+                      {caps.subagents.map((s) => (
+                        <li key={s.name}>
+                          <code>{s.name}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+              </div>
+            </details>
+          )}
+
+          <form
+            className="chatbox"
+            onSubmit={(e) => {
               e.preventDefault();
               void sendPrompt();
-            }
-          }}
-        />
-        {state.status === "working" && (
-          <button
-            type="button"
-            className="chatbox__stop"
-            aria-label="Stop"
-            title="Stop the current turn"
-            onClick={() => void acpCancel(sessionId).catch(() => {})}
+            }}
           >
-            <Square size={16} aria-hidden />
-          </button>
-        )}
-        <button
-          type="button"
-          className="chatbox__shot"
-          aria-label="Screenshot"
-          title="Capture a screenshot of the app and send it with your prompt"
-          disabled={busy}
-          onClick={() => void sendScreenshotPrompt()}
-        >
-          <Camera size={18} aria-hidden />
-        </button>
-        <button
-          type="submit"
-          className="chatbox__send"
-          aria-label="Send"
-          disabled={!prompt.trim()}
-        >
-          <ArrowUp size={18} aria-hidden />
-        </button>
-      </form>
+            {paletteOpen && (
+              <ul
+                id="session-palette"
+                className="palette"
+                role="listbox"
+                aria-label="commands and prompts"
+              >
+                {paletteItems.map((item, i) => (
+                  <li
+                    key={`${item.kind}:${item.name}`}
+                    id={`palette-opt-${i}`}
+                    role="option"
+                    aria-selected={i === paletteActive}
+                    className={`palette__option${
+                      i === paletteActive ? " palette__option--active" : ""
+                    }`}
+                    // onMouseDown (not onClick) so the textarea doesn't blur first.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      selectPaletteItem(item);
+                    }}
+                  >
+                    <span className="palette__name">{item.name}</span>
+                    {item.kind === "prompt" && (
+                      <span className="palette__tag">prompt/skill</span>
+                    )}
+                    {item.description && (
+                      <span className="palette__desc">{item.description}</span>
+                    )}
+                  </li>
+                ))}
+                <li className="palette__foot" aria-hidden="true">
+                  ↑↓ navigate · ↵ select · esc cancel
+                </li>
+              </ul>
+            )}
+            <textarea
+              ref={inputRef}
+              className="chatbox__input"
+              aria-label="prompt"
+              role="combobox"
+              aria-expanded={paletteOpen}
+              aria-controls="session-palette"
+              aria-activedescendant={
+                paletteOpen ? `palette-opt-${paletteActive}` : undefined
+              }
+              autoComplete="off"
+              rows={1}
+              placeholder={
+                busy
+                  ? "Queue a follow-up… (/ for commands)"
+                  : "Ask for changes… (/ for commands)"
+              }
+              value={prompt}
+              onChange={(e) => {
+                setPrompt(e.currentTarget.value);
+                setPaletteDismissed(false);
+                setPaletteIndex(0);
+              }}
+              onKeyDown={(e) => {
+                if (handlePaletteKey(e)) return;
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendPrompt();
+                }
+              }}
+            />
+            {state.status === "working" && (
+              <button
+                type="button"
+                className="chatbox__stop"
+                aria-label="Stop"
+                title="Stop the current turn"
+                onClick={() => void acpCancel(sessionId).catch(() => {})}
+              >
+                <Square size={16} aria-hidden />
+              </button>
+            )}
+            <button
+              type="button"
+              className="chatbox__shot"
+              aria-label="Screenshot"
+              title="Capture a screenshot of the app and send it with your prompt"
+              disabled={busy}
+              onClick={() => void sendScreenshotPrompt()}
+            >
+              <Camera size={18} aria-hidden />
+            </button>
+            <button
+              type="submit"
+              className="chatbox__send"
+              aria-label="Send"
+              disabled={!prompt.trim()}
+            >
+              <ArrowUp size={18} aria-hidden />
+            </button>
+          </form>
 
-      {error && (
-        <p role="alert" className="error">
-          {error}
-        </p>
-      )}
+          {error && (
+            <p role="alert" className="error">
+              {error}
+            </p>
+          )}
+        </div>
+
+        {reviewOpen && session.workspace && (
+          <aside className="pane__review" aria-label="review inspector">
+            <ReviewPanel
+              sessionId={sessionId}
+              onClose={() => setReviewOpen(false)}
+            />
+          </aside>
+        )}
+      </div>
     </section>
   );
 }

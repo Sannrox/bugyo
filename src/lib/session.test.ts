@@ -106,10 +106,18 @@ describe("reduceSession", () => {
   it("surfaces errors and sets error status", () => {
     const s = fold([{ type: "error", message: "boom" }]);
     expect(s.status).toBe("error");
+    expect(s.lastError).toBe("boom");
     expect(s.transcript.at(-1)).toEqual({
       kind: "system",
       text: "Error: boom",
     });
+
+    const recovered = reduceSession(s, {
+      type: "status",
+      sessionId: "s1",
+      status: "idle",
+    });
+    expect(recovered.lastError).toBeNull();
   });
 
   it("stores a capabilities snapshot and preserves subagents", () => {

@@ -54,6 +54,8 @@ export const emptyCapabilities: SessionCapabilities = {
 
 export interface SessionState {
   status: SessionStatus | "disconnected";
+  /** Most recent session-scoped failure, cleared when the session recovers. */
+  lastError: string | null;
   transcript: TranscriptEntry[];
   contextPercent: number | null;
   pendingPermission: PendingPermission | null;
@@ -69,6 +71,7 @@ export interface SessionState {
 
 export const initialSessionState: SessionState = {
   status: "disconnected",
+  lastError: null,
   transcript: [],
   contextPercent: null,
   pendingPermission: null,
@@ -88,6 +91,7 @@ export function reduceSession(
       return {
         ...state,
         status: event.status,
+        lastError: event.status === "error" ? state.lastError : null,
         // Once the turn resumes (or ends), any pending approval is resolved.
         pendingPermission:
           event.status === "needsApproval" ? state.pendingPermission : null,
@@ -216,6 +220,7 @@ export function reduceSession(
       return {
         ...state,
         status: "error",
+        lastError: event.message,
         transcript: [
           ...state.transcript,
           { kind: "system", text: `Error: ${event.message}` },

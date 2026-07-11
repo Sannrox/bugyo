@@ -11,6 +11,7 @@ import SearchPanel from "./SearchPanel";
 import { sessionSearch } from "./lib/ipc";
 
 const ws = (branch: string, repo: string): Workspace => ({
+  task: branch,
   repoRoot: repo,
   baseBranch: "main",
   branch,
@@ -94,5 +95,80 @@ describe("SearchPanel", () => {
       screen.getByRole("button", { name: /search transcripts/i }),
     );
     await screen.findByText(/no transcript matches/i);
+  });
+
+  it("clears transcript results when the query changes", async () => {
+    vi.mocked(sessionSearch).mockResolvedValueOnce([
+      {
+        sessionId: "archived-session",
+        index: 1,
+        kind: "agent",
+        snippet: "old query result",
+      },
+    ]);
+    render(<SearchPanel />);
+    const input = screen.getByLabelText("search query");
+    fireEvent.change(input, { target: { value: "old" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: /search transcripts/i }),
+    );
+    await screen.findByText("old query result");
+
+    fireEvent.change(input, { target: { value: "new" } });
+    expect(screen.queryByText("old query result")).not.toBeInTheDocument();
+  });
+
+  it("ignores an in-flight response after the query changes", async () => {
+    let resolveSearch!: (
+      value: Awaited<ReturnType<typeof sessionSearch>>,
+    ) => void;
+    vi.mocked(sessionSearch).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSearch = resolve;
+      }),
+    );
+    render(<SearchPanel />);
+    const input = screen.getByLabelText("search query");
+    fireEvent.change(input, { target: { value: "old" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: /search transcripts/i }),
+    );
+    fireEvent.change(input, { target: { value: "new" } });
+
+    resolveSearch([
+      {
+        sessionId: "archived-session",
+        index: 1,
+        kind: "agent",
+        snippet: "late old result",
+      },
+    ]);
+    await Promise.resolve();
+    expect(screen.queryByText("late old result")).not.toBeInTheDocument();
+  });
+
+  it("does not navigate to a transcript whose session is no longer loaded", async () => {
+    vi.mocked(sessionSearch).mockResolvedValueOnce([
+      {
+        sessionId: "archived-session",
+        index: 2,
+        kind: "agent",
+        snippet: "historical result",
+      },
+    ]);
+    render(<SearchPanel />);
+    fireEvent.change(screen.getByLabelText("search query"), {
+      target: { value: "historical" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /search transcripts/i }),
+    );
+
+    await screen.findByText("historical result");
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /historical result/i }),
+    ).toBeDisabled();
+    expect(useFleet.getState().activeId).toBeNull();
   });
 });
