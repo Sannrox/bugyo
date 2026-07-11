@@ -6,7 +6,7 @@ import type { ToolDiff } from "./lib/bindings";
 export default function DiffView({ patch }: { patch: string }) {
   const files = useMemo(() => parseUnifiedDiff(patch), [patch]);
   if (files.length === 0) {
-    return <p className="muted">(no committed changes vs base)</p>;
+    return <p className="muted">(no workspace changes vs base)</p>;
   }
 
   const totalAdd = files.reduce((n, f) => n + f.additions, 0);
@@ -20,7 +20,13 @@ export default function DiffView({ patch }: { patch: string }) {
         <span className="diff__del">−{totalDel}</span>
       </p>
       {files.map((file, fi) => (
-        <details key={fi} className="diff__file" open={files.length <= 3}>
+        <details
+          key={fi}
+          id={`diff-file-${fi}`}
+          data-file-path={file.path}
+          className="diff__file"
+          open={files.length <= 3}
+        >
           <summary className="diff__file-head">
             <span className="diff__path">
               {file.oldPath && file.oldPath !== file.path && (

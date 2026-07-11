@@ -12,10 +12,14 @@ import {
 const ALWAYS_ASK = ["execute_bash", "fs_write", "use_aws"];
 
 function parseList(s: string): string[] {
-  return s
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
+  return [
+    ...new Set(
+      s
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 /**
@@ -29,6 +33,11 @@ export default function TrustProfiles() {
   const [autoAllow, setAutoAllow] = useState("");
   const [alwaysAsk, setAlwaysAsk] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const requestedAutoAllow = parseList(autoAllow);
+  const unsafeAutoAllow = requestedAutoAllow.filter((tool) =>
+    ALWAYS_ASK.includes(tool),
+  );
 
   async function refresh() {
     try {
@@ -49,17 +58,24 @@ export default function TrustProfiles() {
     const profile: TrustProfile = {
       id: `tp-${Date.now().toString(36)}`,
       name: n,
-      autoAllowTools: parseList(autoAllow),
-      alwaysAsk: parseList(alwaysAsk),
+      autoAllowTools: requestedAutoAllow.filter(
+        (tool) => !ALWAYS_ASK.includes(tool),
+      ),
+      alwaysAsk: [...new Set([...parseList(alwaysAsk), ...unsafeAutoAllow])],
     };
     try {
+      setBusy(true);
+      setError("");
       await trustProfileSet(profile);
       setName("");
       setAutoAllow("");
       setAlwaysAsk("");
       await refresh();
     } catch (err) {
+      setError(String(err));
       await messageDialog(String(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -130,14 +146,20 @@ export default function TrustProfiles() {
           value={autoAllow}
           onChange={(e) => setAutoAllow(e.currentTarget.value)}
         />
+        {unsafeAutoAllow.length > 0 && (
+          <p className="tp__guidance" role="status">
+            {unsafeAutoAllow.join(", ")} always require approval and will be
+            moved to Always ask.
+          </p>
+        )}
         <input
           aria-label="always-ask tools"
           placeholder="Always ask (comma-separated, optional)"
           value={alwaysAsk}
           onChange={(e) => setAlwaysAsk(e.currentTarget.value)}
         />
-        <button type="submit" disabled={!name.trim()}>
-          Add profile
+        <button type="submit" disabled={busy || !name.trim()}>
+          {busy ? "Adding…" : "Add profile"}
         </button>
       </form>
 

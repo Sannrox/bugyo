@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import Settings from "./Settings";
 import { useSettings } from "./lib/settingsStore";
+import { useFleet } from "./lib/fleetStore";
 
 describe("Settings", () => {
   beforeEach(() => {
     useSettings.setState({ showReasoning: true, toolDisplay: "all" });
+    useFleet.setState({ projects: [] });
   });
 
   it("toggles reasoning visibility through the store", () => {

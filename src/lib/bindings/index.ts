@@ -15,10 +15,15 @@ export interface Project {
   path: string;
   name: string;
   isGitRepo: boolean;
+  baseBranch: string;
+  setupScript: string;
+  checkScript: string;
 }
 
 /** Mirrors `workspace::Workspace`. */
 export interface Workspace {
+  /** Human-readable task that created the workspace (empty on legacy data). */
+  task: string;
   repoRoot: string;
   baseBranch: string;
   branch: string;
@@ -35,6 +40,8 @@ export interface WorkspaceSession {
 export interface SessionInfo {
   sessionId: string;
   workspace: Workspace | null;
+  review: WorkspaceReviewState | null;
+  connected: boolean;
   repo: string;
   queued: number;
 }
@@ -115,6 +122,33 @@ export interface CheckResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+export type ReviewStage =
+  | "active"
+  | "needsReview"
+  | "checksFailed"
+  | "readyToLand"
+  | "pullRequestOpen"
+  | "merged";
+
+/** Durable summary of the latest check against an exact workspace revision. */
+export interface ReviewCheck {
+  script: string;
+  success: boolean;
+  exitCode: number;
+  completedAt: string;
+  changeFingerprint: string;
+}
+
+/** Backend-derived review lifecycle for a workspace. */
+export interface WorkspaceReviewState {
+  stage: ReviewStage;
+  hasChanges: boolean;
+  hasUncommittedChanges: boolean;
+  changedFiles: string[];
+  lastCheck: ReviewCheck | null;
+  pullRequestUrl: string | null;
 }
 
 /** Mirrors `workspace::MergePreview` — non-mutating pre-merge conflict check. */

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useSettings, type ToolDisplay } from "./lib/settingsStore";
 import TrustProfiles from "./TrustProfiles";
 import BudgetSettings from "./BudgetSettings";
+import ProjectDefaults from "./ProjectDefaults";
 import {
   checkForUpdate,
   installUpdate,
@@ -27,10 +28,11 @@ export default function Settings() {
     <section className="settings" aria-label="settings">
       <header className="settings__head">
         <SettingsIcon size={18} aria-hidden />
-        <h2>Settings</h2>
+        <h1>Settings</h1>
       </header>
       <p className="muted settings__note">
-        Display preferences apply to every session and are saved on this device.
+        Configure how Bugyo presents agent work, prepares projects, governs
+        tools, and controls spend. Settings are saved on this device.
       </p>
 
       <div className="settings__group">
@@ -73,6 +75,7 @@ export default function Settings() {
         </div>
       </div>
 
+      <ProjectDefaults />
       <TrustProfiles />
       <BudgetSettings />
       <UpdatesSection />
@@ -86,8 +89,10 @@ function UpdatesSection() {
     "idle" | "checking" | "installing" | "installed"
   >("idle");
   const [result, setResult] = useState<UpdateCheck | null>(null);
+  const [installError, setInstallError] = useState("");
 
   const onCheck = async () => {
+    setInstallError("");
     setState("checking");
     setResult(await checkForUpdate());
     setState("idle");
@@ -96,10 +101,12 @@ function UpdatesSection() {
   const onInstall = async () => {
     if (result?.status !== "available") return;
     setState("installing");
+    setInstallError("");
     try {
       await installUpdate(result.update);
       setState("installed");
-    } catch {
+    } catch (cause) {
+      setInstallError(String(cause));
       setState("idle");
     }
   };
@@ -143,6 +150,11 @@ function UpdatesSection() {
           </button>
         )}
       </div>
+      {installError && (
+        <p className="error" role="alert">
+          Update installation failed: {installError}
+        </p>
+      )}
     </div>
   );
 }

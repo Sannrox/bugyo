@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useFleet } from "./lib/fleetStore";
 import { confirmDialog, messageDialog, workspaceArchive } from "./lib/ipc";
 
@@ -24,13 +24,24 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
   const openAutomations = useFleet((s) => s.openAutomations);
   const openSettings = useFleet((s) => s.openSettings);
   const openFleet = useFleet((s) => s.openFleet);
+  const openSearch = useFleet((s) => s.openSearch);
+  const openEventLog = useFleet((s) => s.openEventLog);
 
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
 
   useEffect(() => {
+    const restoreTarget = previousFocus.current;
     inputRef.current?.focus();
+    return () => {
+      if (restoreTarget?.isConnected) restoreTarget.focus();
+    };
   }, []);
 
   async function archiveActive() {
@@ -38,8 +49,8 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
     const sess = activeId ? useFleet.getState().sessions[activeId] : null;
     if (!activeId || !sess?.workspace) return;
     const ok = await confirmDialog(
-      "Archive this workspace? This removes the git worktree and deletes its " +
-        "branch. Uncommitted changes will be discarded.",
+      "Archive this workspace? This removes the local git worktree and discards " +
+        "uncommitted changes. Git deletes a safely merged branch; an unmerged branch is retained.",
       "Archive workspace",
     );
     if (!ok) return;
@@ -51,11 +62,11 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const commands = useMemo<Command[]>(() => {
+  const commands: Command[] = (() => {
     const nav: Command[] = [
       {
         id: "nav:new",
-        label: "New session",
+        label: "New task",
         hint: "compose",
         run: () => setActive(null),
       },
@@ -78,6 +89,18 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
         run: openAutomations,
       },
       {
+        id: "nav:search",
+        label: "Search sessions and transcripts",
+        hint: "view",
+        run: openSearch,
+      },
+      {
+        id: "nav:eventlog",
+        label: "Event history",
+        hint: "view",
+        run: openEventLog,
+      },
+      {
         id: "nav:settings",
         label: "Settings",
         hint: "view",
@@ -87,7 +110,10 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
 
     const jumps: Command[] = order.map((id) => {
       const sess = sessions[id];
-      const name = sess?.workspace?.branch ?? "plain session";
+      const name =
+        (sess?.name ?? sess?.workspace?.task) ||
+        sess?.workspace?.branch ||
+        "Plain session";
       return {
         id: `go:${id}`,
         label: `Go to ${name}`,
@@ -110,8 +136,7 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
       : [];
 
     return [...nav, ...jumps, ...actions];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [order, sessions]);
+  })();
 
   const q = query.trim().toLowerCase();
   const filtered = q
@@ -131,6 +156,7 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
       <div
         className="cmdk"
         role="dialog"
+        aria-modal="true"
         aria-label="command palette"
         onClick={(e) => e.stopPropagation()}
       >
@@ -138,9 +164,12 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
           ref={inputRef}
           className="cmdk__input"
           role="combobox"
-          aria-expanded
+          aria-expanded="true"
+          aria-autocomplete="list"
           aria-controls="cmdk-list"
-          aria-activedescendant={`cmdk-opt-${active}`}
+          aria-activedescendant={
+            filtered.length > 0 ? `cmdk-opt-${active}` : undefined
+          }
           autoComplete="off"
           placeholder="Jump to a session or run a command…"
           value={query}
@@ -165,6 +194,11 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
             } else if (e.key === "Escape") {
               e.preventDefault();
               onClose();
+            } else if (e.key === "Tab") {
+              // The combobox is the sole focus target in this modal pattern;
+              // options are navigated with arrows and selected with Enter.
+              e.preventDefault();
+              inputRef.current?.focus();
             }
           }}
         />

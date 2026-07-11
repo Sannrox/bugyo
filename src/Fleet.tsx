@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { AcpEvent } from "./lib/bindings";
 import {
@@ -11,6 +11,9 @@ import {
   projectList,
   setAttentionBadge,
   budgetGet,
+  orchEnqueue,
+  workspaceCheck,
+  workspaceReviewState,
 } from "./lib/ipc";
 import { useFleet } from "./lib/fleetStore";
 import { useBudget } from "./lib/budgetStore";
@@ -39,8 +42,14 @@ export default function Fleet() {
   const setQueued = useFleet((s) => s.setQueued);
   const setHeartbeat = useFleet((s) => s.setHeartbeat);
   const setProjects = useFleet((s) => s.setProjects);
+  const setReview = useFleet((s) => s.setReview);
   const errors = useFleet((s) => s.errors);
   const dismissError = useFleet((s) => s.dismissError);
+  const reportError = useFleet((s) => s.reportError);
+  const [hydrationVersion, setHydrationVersion] = useState(0);
+  const [hydrationFailed, setHydrationFailed] = useState(false);
+  const verifying = useRef(new Set<string>());
+  const autoFixAttempts = useRef(new Map<string, number>());
   // Mirror the attention count to the OS dock/taskbar badge.
   const attentionCount = useFleet(
     (s) =>
@@ -60,12 +69,9 @@ export default function Fleet() {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setPaletteOpen((v) => !v);
-      } else if (
-        (e.metaKey || e.ctrlKey) &&
-        e.shiftKey &&
-        (e.key === "f" || e.key === "F")
-      ) {
-        // ⌘⇧F / Ctrl-Shift-F opens cross-session transcript search.
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === "f" || e.key === "F")) {
+        // ⌘F / Ctrl-F is the expected desktop search gesture. ⌘⇧F remains
+        // compatible because it satisfies the same condition.
         e.preventDefault();
         openSearch();
       }
@@ -78,11 +84,16 @@ export default function Fleet() {
   useEffect(() => {
     let active = true;
     const unlisteners: UnlistenFn[] = [];
-    const track = (p: Promise<UnlistenFn>) =>
-      p.then((fn) => {
-        if (active) unlisteners.push(fn);
-        else fn();
-      });
+    const track = (label: string, p: Promise<UnlistenFn>) =>
+      p
+        .then((fn) => {
+          if (active) unlisteners.push(fn);
+          else fn();
+        })
+        .catch((cause) => {
+          if (active)
+            reportError(`Unable to subscribe to ${label}: ${String(cause)}`);
+        });
 
     // Coalesce high-frequency `session/update` events: buffer them and commit
     // once per animation frame (microtask fallback in non-DOM/test env) so a
@@ -106,7 +117,53 @@ export default function Fleet() {
       }
     };
 
+    const verifyAfterTurn = async (sessionId: string) => {
+      if (verifying.current.has(sessionId)) return;
+      verifying.current.add(sessionId);
+      try {
+        const review = await workspaceReviewState(sessionId);
+        if (active) setReview(sessionId, review);
+        if (review.stage !== "needsReview" || !review.hasChanges) return;
+
+        const fleet = useFleet.getState();
+        const session = fleet.sessions[sessionId];
+        const script = fleet.projects.find(
+          (project) => project.path === session?.workspace?.repoRoot,
+        )?.checkScript;
+        if (!script?.trim()) return;
+
+        const result = await workspaceCheck(sessionId, script.trim());
+        const checked = await workspaceReviewState(sessionId);
+        if (active) setReview(sessionId, checked);
+        if (result.success) {
+          autoFixAttempts.current.delete(sessionId);
+          return;
+        }
+
+        const attempts = autoFixAttempts.current.get(sessionId) ?? 0;
+        if (attempts >= 2) {
+          void notify(
+            "Agent verification needs attention",
+            `Checks still fail for ${session?.workspace?.task || sessionId}.`,
+          );
+          return;
+        }
+        autoFixAttempts.current.set(sessionId, attempts + 1);
+        const output = `${result.stdout}\n${result.stderr}`.trim().slice(-6000);
+        await orchEnqueue(
+          sessionId,
+          `Bugyo ran the configured verification command:\n\n${script.trim()}\n\nIt failed with exit ${result.exitCode}. Fix the root cause, run the relevant checks yourself, and keep iterating until they pass.\n\nFailure output:\n${output || "(no output)"}`,
+        );
+      } catch {
+        // Plain sessions have no workspace review state. Verification command
+        // failures are persisted and surfaced by the review inspector.
+      } finally {
+        verifying.current.delete(sessionId);
+      }
+    };
+
     void track(
+      "agent events",
       onAcpEvent((event) => {
         // Backend errors have no session id; surface them immediately as an OS
         // notification (they're also collected into the in-app banner via
@@ -114,13 +171,30 @@ export default function Fleet() {
         if (event.type === "error") {
           void notify("Backend error", event.message);
         }
+        // A completed turn may have changed files. Resolve the backend-owned
+        // lifecycle immediately so the fleet shows "Needs review" without the
+        // user first opening the review panel.
+        if (
+          event.type === "status" &&
+          event.status === "idle" &&
+          event.sessionId
+        ) {
+          void verifyAfterTurn(event.sessionId);
+        }
         buffer.push(event);
         schedule();
       }),
     );
-    void track(onOrchQueue((u) => setQueued(u.sessionId, u.queued)));
-    void track(onOrchHeartbeat((r) => setHeartbeat(r)));
     void track(
+      "queue updates",
+      onOrchQueue((u) => setQueued(u.sessionId, u.queued)),
+    );
+    void track(
+      "heartbeat updates",
+      onOrchHeartbeat((r) => setHeartbeat(r)),
+    );
+    void track(
+      "automation runs",
       onAutomationRun((run) => {
         void notify(
           run.status === "error" ? "Automation failed" : "Automation ran",
@@ -136,7 +210,7 @@ export default function Fleet() {
       flush(); // commit any buffered events before tearing down
       unlisteners.forEach((fn) => fn());
     };
-  }, [applyEvents, setQueued, setHeartbeat]);
+  }, [applyEvents, reportError, setQueued, setHeartbeat, setReview]);
 
   // Reconcile with any sessions the backend already holds (e.g. after reload).
   useEffect(() => {
@@ -146,35 +220,45 @@ export default function Fleet() {
           addSession({
             sessionId: info.sessionId,
             workspace: info.workspace,
+            review: info.review,
+            connected: info.connected,
             queued: info.queued,
             repoRoot: info.workspace ? info.workspace.repoRoot : info.repo,
           });
         }
         // Apply durable pin/name/order once the sessions exist in the store.
-        return hydrateSessionMeta();
+        return hydrateSessionMeta().catch((cause) => {
+          setHydrationFailed(true);
+          reportError(
+            `Unable to load session names and ordering: ${String(cause)}`,
+          );
+        });
       })
-      .catch(() => {
-        /* best-effort reconciliation */
+      .catch((cause) => {
+        setHydrationFailed(true);
+        reportError(`Unable to restore sessions: ${String(cause)}`);
       });
-  }, [addSession]);
+  }, [addSession, hydrationVersion, reportError]);
 
   // Load the registered projects.
   useEffect(() => {
     projectList()
       .then(setProjects)
-      .catch(() => {
-        /* best-effort */
+      .catch((cause) => {
+        setHydrationFailed(true);
+        reportError(`Unable to load projects: ${String(cause)}`);
       });
-  }, [setProjects]);
+  }, [hydrationVersion, reportError, setProjects]);
 
   // Load budget caps so sessions can be flagged near/over their limit.
   useEffect(() => {
     budgetGet()
       .then((c) => useBudget.getState().setConfig(c))
-      .catch(() => {
-        /* best-effort */
+      .catch((cause) => {
+        setHydrationFailed(true);
+        reportError(`Unable to load budget caps: ${String(cause)}`);
       });
-  }, []);
+  }, [hydrationVersion, reportError]);
 
   return (
     <div
@@ -202,6 +286,20 @@ export default function Fleet() {
                 </button>
               </div>
             ))}
+          </div>
+        )}
+        {hydrationFailed && (
+          <div className="startup-retry" role="status">
+            <span>Some startup data could not be loaded.</span>
+            <button
+              type="button"
+              onClick={() => {
+                setHydrationFailed(false);
+                setHydrationVersion((version) => version + 1);
+              }}
+            >
+              Retry startup loads
+            </button>
           </div>
         )}
         {panel === "inbox" ? (

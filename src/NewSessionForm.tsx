@@ -1,5 +1,13 @@
-import { useEffect, useState } from "react";
-import { Folder, GitBranch, Plus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowUp,
+  ChevronDown,
+  Folder,
+  GitBranch,
+  Plus,
+  ShieldCheck,
+  SquareTerminal,
+} from "lucide-react";
 import {
   acpStartSession,
   messageDialog,
@@ -20,8 +28,8 @@ export default function NewSessionForm() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const submitting = useRef(false);
 
-  const [trustAll, setTrustAll] = useState(false);
   const [trustTools, setTrustTools] = useState("");
   // Trust-profile presets (loaded from the backend); picking one fills
   // trustTools with the profile's effective (destructive-stripped) tools.
@@ -39,7 +47,6 @@ export default function NewSessionForm() {
   async function applyProfile(id: string) {
     setProfileId(id);
     if (!id) return;
-    setTrustAll(false);
     try {
       const tools = await trustProfileEffectiveTools(id);
       setTrustTools(tools.join(", "));
@@ -54,6 +61,7 @@ export default function NewSessionForm() {
   const [setupScript, setSetupScript] = useState("");
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
+  const [mode, setMode] = useState<"workspace" | "plain">("workspace");
 
   async function addProjectFlow() {
     try {
@@ -78,12 +86,29 @@ export default function NewSessionForm() {
   const selectedProject = projects.find((p) => p.path === repoRoot);
   const isGitProject = selectedProject?.isGitRepo ?? false;
 
-  // Git project → create a worktree workspace; otherwise → plain session.
+  useEffect(() => {
+    if (repoRoot || mode !== "workspace") return;
+    const gitProjects = projects.filter((project) => project.isGitRepo);
+    if (gitProjects.length === 1) setRepoRoot(gitProjects[0].path);
+  }, [mode, projects, repoRoot]);
+
+  useEffect(() => {
+    if (mode !== "workspace" || !selectedProject) return;
+    setBaseBranch(selectedProject.baseBranch || "main");
+    setSetupScript(selectedProject.setupScript || "");
+  }, [mode, selectedProject]);
+
   async function submit() {
-    if (isGitProject) {
-      await createWorkspace();
-    } else {
-      await startPlain();
+    if (submitting.current) return;
+    submitting.current = true;
+    try {
+      if (mode === "workspace") {
+        await createWorkspace();
+      } else {
+        await startPlain();
+      }
+    } finally {
+      submitting.current = false;
     }
   }
 
@@ -96,7 +121,7 @@ export default function NewSessionForm() {
         baseBranch: baseBranch.trim() || "main",
         task: task.trim(),
         setupScript: setupScript.trim() || undefined,
-        trustAll,
+        trustAll: false,
         trustTools: trustToolsList(),
         agent: agent.trim() || undefined,
         model: model.trim() || undefined,
@@ -120,7 +145,7 @@ export default function NewSessionForm() {
       setBusy(true);
       const id = await acpStartSession({
         cwd: repoRoot.trim() || undefined,
-        trustAll,
+        trustAll: false,
         trustTools: trustToolsList(),
         agent: agent.trim() || undefined,
         model: model.trim() || undefined,
@@ -135,9 +160,16 @@ export default function NewSessionForm() {
 
   return (
     <div className="composer">
-      <h1 className="composer__title">What should Bugyo run?</h1>
+      <div className="composer__eyebrow">NEW TASK</div>
+      <h1
+        className="composer__title"
+        aria-label="What should the fleet work on?"
+      >
+        What do you want to build?
+      </h1>
       <p className="composer__subtitle muted">
-        Create an isolated git-worktree workspace, or start a plain session.
+        Describe the outcome. Bugyo isolates the work, keeps the agent visible,
+        and brings changes back here for review.
       </p>
 
       <form
@@ -147,14 +179,21 @@ export default function NewSessionForm() {
           void submit();
         }}
       >
-        <input
-          className="composer__task"
-          aria-label="task"
-          placeholder="Task name (becomes the branch)…"
-          value={task}
-          onChange={(e) => setTask(e.currentTarget.value)}
-          required={isGitProject}
-        />
+        {mode === "workspace" && (
+          <label className="composer__field composer__field--task">
+            <span className="sr-only">Task</span>
+            <textarea
+              className="composer__task"
+              aria-label="task"
+              placeholder="Describe a task, feature, or fix…"
+              value={task}
+              onChange={(e) => setTask(e.currentTarget.value)}
+              required
+              autoFocus
+              rows={4}
+            />
+          </label>
+        )}
 
         <div className="composer__bar">
           <span className="chip chip--grow">
@@ -168,7 +207,7 @@ export default function NewSessionForm() {
               <option value="">
                 {projects.length
                   ? "Select a project…"
-                  : "No projects — add one →"}
+                  : "Add your first project →"}
               </option>
               {projects.map((p) => (
                 <option key={p.path} value={p.path}>
@@ -178,45 +217,111 @@ export default function NewSessionForm() {
               ))}
             </select>
           </span>
-          <button
-            type="button"
-            className="chip chip--btn"
-            onClick={() => void addProjectFlow()}
-            title="Add a project (repository)"
-          >
-            <Plus size={14} aria-hidden /> Add project
-          </button>
-          {isGitProject && (
-            <span className="chip chip--branch">
-              <GitBranch size={14} aria-hidden />
-              <input
-                className="chip__input"
-                aria-label="base branch"
-                placeholder="base"
-                value={baseBranch}
-                onChange={(e) => setBaseBranch(e.currentTarget.value)}
-              />
-            </span>
+          {projects.length === 0 && (
+            <button
+              type="button"
+              className="chip chip--btn"
+              onClick={() => void addProjectFlow()}
+              title="Add a project (repository)"
+            >
+              <Plus size={14} aria-hidden /> Add project
+            </button>
           )}
-          <label
-            className="chip chip--toggle"
-            title="Auto-approve all tool calls"
+          <button
+            type="submit"
+            className="composer__send"
+            aria-label={
+              mode === "workspace" ? "Create workspace" : "Start plain session"
+            }
+            disabled={
+              busy || (mode === "workspace" && (!isGitProject || !task.trim()))
+            }
           >
-            <input
-              type="checkbox"
-              checked={trustAll}
-              onChange={(e) => setTrustAll(e.currentTarget.checked)}
-            />
-            Trust all
-          </label>
-          <button type="submit" className="composer__send" disabled={busy}>
-            {busy ? "…" : isGitProject ? "Create workspace" : "Start session"}
+            {busy ? (
+              <span className="composer__spinner" aria-label="Starting" />
+            ) : (
+              <ArrowUp size={18} aria-hidden />
+            )}
           </button>
         </div>
 
+        {mode === "workspace" && (
+          <div className="composer__safety">
+            <ShieldCheck size={15} aria-hidden />
+            <span>
+              Your main checkout stays untouched. Tool calls still ask for
+              approval by default.
+            </span>
+          </div>
+        )}
+        {mode === "plain" && (
+          <p className="composer__plain-warning" role="note">
+            Plain sessions do not create a worktree. The agent operates directly
+            in the selected directory.
+          </p>
+        )}
+
         <details className="composer__more">
-          <summary className="muted">Advanced</summary>
+          <summary className="muted">
+            <span>Advanced</span>
+            <span className="composer__mode-label">
+              {mode === "workspace" ? "Isolated workspace" : "Plain session"}
+            </span>
+            <ChevronDown size={14} aria-hidden />
+          </summary>
           <div className="composer__advanced">
+            <div
+              className="composer__mode"
+              role="group"
+              aria-label="session type"
+            >
+              <button
+                type="button"
+                className={
+                  mode === "workspace"
+                    ? "composer__mode-btn composer__mode-btn--active"
+                    : "composer__mode-btn"
+                }
+                aria-pressed={mode === "workspace"}
+                onClick={() => setMode("workspace")}
+              >
+                <GitBranch size={16} aria-hidden />
+                <span>
+                  <strong>Isolated workspace</strong>
+                  <small>Recommended · new worktree and branch</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className={
+                  mode === "plain"
+                    ? "composer__mode-btn composer__mode-btn--active"
+                    : "composer__mode-btn"
+                }
+                aria-pressed={mode === "plain"}
+                onClick={() => {
+                  setMode("plain");
+                  setRepoRoot("");
+                }}
+              >
+                <SquareTerminal size={16} aria-hidden />
+                <span>
+                  <strong>Plain session</strong>
+                  <small>Advanced · works in an existing directory</small>
+                </span>
+              </button>
+            </div>
+            {mode === "workspace" && (
+              <label className="composer__field">
+                <span>Base branch</span>
+                <input
+                  aria-label="base branch"
+                  placeholder="main"
+                  value={baseBranch}
+                  onChange={(e) => setBaseBranch(e.currentTarget.value)}
+                />
+              </label>
+            )}
             <div className="ws-form__row">
               <input
                 aria-label="agent"
@@ -237,47 +342,42 @@ export default function NewSessionForm() {
               value={setupScript}
               onChange={(e) => setSetupScript(e.currentTarget.value)}
             />
-            {!trustAll && (
-              <>
-                {profiles.length > 0 && (
-                  <select
-                    aria-label="trust profile"
-                    value={profileId}
-                    onChange={(e) => void applyProfile(e.currentTarget.value)}
-                  >
-                    <option value="">Trust profile (optional)…</option>
-                    {profiles.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                <input
-                  aria-label="trust tools"
-                  placeholder="Trust specific tools (comma-separated, optional)"
-                  value={trustTools}
-                  onChange={(e) => setTrustTools(e.currentTarget.value)}
-                />
-              </>
+            {profiles.length > 0 && (
+              <select
+                aria-label="trust profile"
+                value={profileId}
+                onChange={(e) => void applyProfile(e.currentTarget.value)}
+              >
+                <option value="">Trust profile (optional)…</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
             )}
+            <input
+              aria-label="trust tools"
+              placeholder="Trust non-destructive tools (comma-separated, optional)"
+              value={trustTools}
+              onChange={(e) => setTrustTools(e.currentTarget.value)}
+            />
+            <p className="composer__safety-note muted">
+              Writes, shell execution, and cloud actions always ask for
+              approval.
+            </p>
           </div>
         </details>
-
-        {trustAll && (
-          <p role="alert" className="warn">
-            ⚠ The agent will run every tool — including writes and destructive
-            actions — without asking.
-          </p>
-        )}
       </form>
 
       <p className="composer__hint muted">
-        {isGitProject
-          ? "Creates an isolated git worktree + branch and runs an agent there."
+        {mode === "workspace"
+          ? selectedProject
+            ? "Ready to create an isolated workspace for this project."
+            : "Choose a git project to continue."
           : selectedProject
-            ? "This project isn't a git repo — starts a plain session in its directory (no worktree)."
-            : "Pick a project, or start a plain session in the current directory."}
+            ? `The session will run directly in ${selectedProject.name}.`
+            : "Choose a project, or leave it empty to use Bugyo's current directory."}
       </p>
 
       {error && (

@@ -56,6 +56,29 @@ describe("TrustProfiles", () => {
     expect(arg.autoAllowTools).toEqual(["fs_read", "code"]);
   });
 
+  it("moves destructive tools out of auto-allow instead of silently trusting them", async () => {
+    vi.mocked(trustProfileList).mockResolvedValue([]);
+    render(<TrustProfiles />);
+    await waitFor(() => expect(trustProfileList).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("profile name"), {
+      target: { value: "Safe edits" },
+    });
+    fireEvent.change(screen.getByLabelText("auto-allow tools"), {
+      target: { value: "fs_read, fs_write, fs_read" },
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /fs_write.*always require approval/i,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /add profile/i }));
+
+    await waitFor(() => expect(trustProfileSet).toHaveBeenCalled());
+    const profile = vi.mocked(trustProfileSet).mock.calls[0][0];
+    expect(profile.autoAllowTools).toEqual(["fs_read"]);
+    expect(profile.alwaysAsk).toContain("fs_write");
+  });
+
   it("deletes a profile after confirmation", async () => {
     vi.mocked(confirmDialog).mockResolvedValue(true);
     vi.mocked(trustProfileList).mockResolvedValue([

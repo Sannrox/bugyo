@@ -5,6 +5,8 @@
 //! git invocations use `std::process::Command` with explicit args (never a
 //! shell string) and run against an explicit `current_dir`.
 
+use std::collections::BTreeSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,6 +36,12 @@ pub enum WorkspaceError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Workspace {
+    /// Human-readable task that created this workspace.
+    ///
+    /// Older persisted workspaces predate this field, so deserialize them with
+    /// an empty task and let clients fall back to the branch name.
+    #[serde(default)]
+    pub task: String,
     /// Absolute path to the repository the workspace was cut from.
     pub repo_root: String,
     /// Branch the workspace was based on (e.g. `main`).
@@ -157,6 +165,7 @@ pub fn create(
     let canonical = std::fs::canonicalize(&worktree_path).unwrap_or(worktree_path);
 
     Ok(Workspace {
+        task: slug.trim().to_string(),
         repo_root: repo_root.to_string_lossy().into_owned(),
         base_branch: base_branch.to_string(),
         branch,
@@ -192,17 +201,45 @@ pub fn diff_stat(
     )
 }
 
-/// Full patch of the changes the branch introduced vs its base (three-dot, so
-/// only the branch's own changes are shown), for the review panel.
+/// Full patch of the current workspace versus its base, including committed,
+/// staged, unstaged, and untracked changes. The review surface must show the
+/// same contents that its fingerprint and changed-file count describe.
 pub fn diff(
     worktree_path: &Path,
     base_branch: &str,
-    branch: &str,
+    _branch: &str,
 ) -> Result<String, WorkspaceError> {
-    run_git(
+    let mut patch = run_git(
         worktree_path,
-        &["--no-pager", "diff", &format!("{base_branch}...{branch}")],
-    )
+        &["--no-pager", "diff", "--binary", base_branch],
+    )?;
+    for relative in untracked_files(worktree_path)? {
+        let output = Command::new("git")
+            .current_dir(worktree_path)
+            .args([
+                "--no-pager",
+                "diff",
+                "--binary",
+                "--no-index",
+                "--",
+                "/dev/null",
+                &relative,
+            ])
+            .output()?;
+        // `git diff --no-index` returns 1 when differences were found.
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(WorkspaceError::Git {
+                op: "diff".to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        let untracked_patch = String::from_utf8_lossy(&output.stdout);
+        if !patch.is_empty() && !untracked_patch.is_empty() {
+            patch.push('\n');
+        }
+        patch.push_str(untracked_patch.trim_end());
+    }
+    Ok(patch)
 }
 
 /// Result of running a workspace check/run script.
@@ -213,6 +250,197 @@ pub struct CheckResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Durable summary of the latest workspace check. The change fingerprint
+/// invalidates a green result as soon as the worktree changes again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCheck {
+    pub script: String,
+    pub success: bool,
+    pub exit_code: i32,
+    pub completed_at: String,
+    pub change_fingerprint: String,
+}
+
+/// Durable landing outcome for a workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum LandingState {
+    PullRequest { url: String },
+    Merged,
+}
+
+/// Review metadata persisted with the session descriptor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewRecord {
+    #[serde(default)]
+    pub last_check: Option<ReviewCheck>,
+    #[serde(default)]
+    pub landing: Option<LandingState>,
+}
+
+/// Backend-derived review lifecycle shown by every frontend surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewStage {
+    Active,
+    NeedsReview,
+    ChecksFailed,
+    ReadyToLand,
+    PullRequestOpen,
+    Merged,
+}
+
+/// Current review state, combining durable check/landing metadata with the
+/// live git worktree. This is deliberately backend-owned so the fleet and the
+/// review panel cannot disagree about whether checks are still valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewState {
+    pub stage: ReviewStage,
+    pub has_changes: bool,
+    pub has_uncommitted_changes: bool,
+    pub changed_files: Vec<String>,
+    pub last_check: Option<ReviewCheck>,
+    pub pull_request_url: Option<String>,
+}
+
+fn untracked_files(worktree_path: &Path) -> Result<Vec<String>, WorkspaceError> {
+    let output = run_git(
+        worktree_path,
+        &["ls-files", "--others", "--exclude-standard"],
+    )?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Fingerprint the resulting workspace contents relative to the base. This is
+/// deliberately independent of Git's staged/committed state so a human can
+/// commit the exact files they reviewed without invalidating a green check.
+fn change_fingerprint(workspace: &Workspace) -> Result<String, WorkspaceError> {
+    let root = Path::new(&workspace.worktree_path);
+    let tracked = run_git(root, &["diff", "--name-only", &workspace.base_branch])?;
+    let mut changed = BTreeSet::new();
+    changed.extend(
+        tracked
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string),
+    );
+    changed.extend(untracked_files(root)?);
+
+    let mut hasher = DefaultHasher::new();
+    for relative in changed {
+        relative.hash(&mut hasher);
+        let path = root.join(&relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                "symlink".hash(&mut hasher);
+                std::fs::read_link(&path)?.hash(&mut hasher);
+            }
+            Ok(metadata) => {
+                "file".hash(&mut hasher);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    (metadata.permissions().mode() & 0o111).hash(&mut hasher);
+                }
+                std::fs::read(&path)?.hash(&mut hasher);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "deleted".hash(&mut hasher);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+/// Stage and commit every reviewed workspace change with an explicit message.
+pub fn commit_all(worktree_path: &Path, message: &str) -> Result<(), WorkspaceError> {
+    if message.trim().is_empty() {
+        return Err(WorkspaceError::InvalidPath(
+            "commit message cannot be empty".to_string(),
+        ));
+    }
+    run_git(worktree_path, &["add", "--all"])?;
+    run_git(worktree_path, &["commit", "-m", message.trim()])?;
+    Ok(())
+}
+
+/// Resolve the current review lifecycle from git plus its durable record.
+pub fn review_state(
+    workspace: &Workspace,
+    record: &ReviewRecord,
+) -> Result<ReviewState, WorkspaceError> {
+    let root = Path::new(&workspace.worktree_path);
+    let status_lines = status(root)?;
+    let tracked_files = run_git(root, &["diff", "--name-only", &workspace.base_branch])?;
+    let untracked = untracked_files(root)?;
+    let mut files = BTreeSet::new();
+    files.extend(
+        tracked_files
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string),
+    );
+    files.extend(untracked);
+    let changed_files: Vec<String> = files.into_iter().collect();
+    let has_changes = !changed_files.is_empty();
+    let fingerprint = change_fingerprint(workspace)?;
+    let check_is_current = record
+        .last_check
+        .as_ref()
+        .is_some_and(|check| check.change_fingerprint == fingerprint);
+
+    let (stage, pull_request_url) = match &record.landing {
+        Some(LandingState::Merged) => (ReviewStage::Merged, None),
+        Some(LandingState::PullRequest { url }) => {
+            (ReviewStage::PullRequestOpen, Some(url.clone()))
+        }
+        None if !has_changes => (ReviewStage::Active, None),
+        None if check_is_current && record.last_check.as_ref().is_some_and(|c| c.success) => {
+            (ReviewStage::ReadyToLand, None)
+        }
+        None if check_is_current => (ReviewStage::ChecksFailed, None),
+        None => (ReviewStage::NeedsReview, None),
+    };
+
+    Ok(ReviewState {
+        stage,
+        has_changes,
+        has_uncommitted_changes: !status_lines.is_empty(),
+        changed_files,
+        last_check: record.last_check.clone(),
+        pull_request_url,
+    })
+}
+
+/// Record a check against the exact current workspace contents.
+pub fn record_check(
+    workspace: &Workspace,
+    record: &mut ReviewRecord,
+    script: String,
+    result: &CheckResult,
+    completed_at: String,
+) -> Result<(), WorkspaceError> {
+    record.last_check = Some(ReviewCheck {
+        script,
+        success: result.success,
+        exit_code: result.exit_code,
+        completed_at,
+        change_fingerprint: change_fingerprint(workspace)?,
+    });
+    Ok(())
 }
 
 /// Run a check/run script in the worktree via `sh -c`, capturing pass/fail and
@@ -338,12 +566,14 @@ pub fn run_setup_script(worktree_path: &Path, script: &str) -> Result<(), Worksp
     }
 }
 
-/// Archive a workspace: remove the worktree and delete its branch.
+/// Archive a workspace: remove the worktree and delete its branch when safe.
 ///
 /// `force` is required to remove a dirty worktree (discarding uncommitted
 /// changes) — a destructive action the caller must opt into explicitly. Branch
-/// deletion uses the safe `-d` (refuses if unmerged); force-deleting an
-/// unmerged branch is intentionally not offered here.
+/// Branch deletion uses the safe `-d`. An unmerged branch (for example, one
+/// backing an open pull request) is deliberately retained so archiving can
+/// still clean up the local worktree without losing the branch or leaving the
+/// session half-archived.
 pub fn archive(
     repo_root: &Path,
     worktree_path: &Path,
@@ -361,7 +591,29 @@ pub fn archive(
     remove_args.push(worktree_str);
     run_git(repo_root, &remove_args)?;
 
-    run_git(repo_root, &["branch", "-d", branch])?;
+    // `branch -d` is intentionally best-effort: Git refuses unmerged branches,
+    // which is the desired outcome for PR-backed workspaces. The worktree has
+    // already been removed, so surfacing that refusal as an archive failure
+    // would leave the persisted session pointing at a path that no longer
+    // exists. Other deletion failures likewise retain the branch safely.
+    let _ = run_git(repo_root, &["branch", "-d", branch]);
+    Ok(())
+}
+
+/// Roll back a workspace that failed during creation before it was exposed to
+/// the user. Unlike normal archive, this may force-delete the branch because
+/// both the worktree and branch were created by the same unsuccessful
+/// transaction and cannot contain accepted user work.
+pub fn rollback_create(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+) -> Result<(), WorkspaceError> {
+    let worktree_str = worktree_path
+        .to_str()
+        .ok_or_else(|| WorkspaceError::InvalidPath(worktree_path.display().to_string()))?;
+    run_git(repo_root, &["worktree", "remove", "--force", worktree_str])?;
+    run_git(repo_root, &["branch", "-D", branch])?;
     Ok(())
 }
 
@@ -469,6 +721,9 @@ mod tests {
         run_git(dir, &["init", "-q", "-b", "main"]).unwrap();
         run_git(dir, &["config", "user.email", "t@example.com"]).unwrap();
         run_git(dir, &["config", "user.name", "Test"]).unwrap();
+        // Test repositories must not inherit a developer's global signing
+        // policy or require an interactive pinentry/GPG agent.
+        run_git(dir, &["config", "commit.gpgSign", "false"]).unwrap();
         std::fs::write(dir.join("file.txt"), "line1\n").unwrap();
         run_git(dir, &["add", "file.txt"]).unwrap();
         run_git(dir, &["commit", "-q", "-m", "init"]).unwrap();
@@ -521,9 +776,79 @@ mod tests {
         let wt_root = tmp.path().join("wts");
 
         let ws = create(&repo, "main", "add feature", &wt_root).unwrap();
+        assert_eq!(ws.task, "add feature");
         assert_eq!(ws.branch, "add-feature");
         assert!(Path::new(&ws.worktree_path).join("file.txt").exists());
         assert!(branch_exists(&repo, "add-feature"));
+    }
+
+    #[test]
+    fn review_state_tracks_checks_and_invalidates_them_on_change() {
+        let tmp = Tmp::new("review-state");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let workspace = create(&repo, "main", "review flow", &tmp.path().join("wts")).unwrap();
+        let mut record = ReviewRecord::default();
+
+        assert_eq!(
+            review_state(&workspace, &record).unwrap().stage,
+            ReviewStage::Active
+        );
+
+        let changed = Path::new(&workspace.worktree_path).join("review.txt");
+        std::fs::write(&changed, "first\n").unwrap();
+        let pending = review_state(&workspace, &record).unwrap();
+        assert_eq!(pending.stage, ReviewStage::NeedsReview);
+        assert!(pending.has_uncommitted_changes);
+        assert_eq!(pending.changed_files, vec!["review.txt"]);
+        let patch = diff(
+            Path::new(&workspace.worktree_path),
+            &workspace.base_branch,
+            &workspace.branch,
+        )
+        .unwrap();
+        assert!(patch.contains("diff --git"));
+        assert!(patch.contains("+first"));
+
+        let passed = run_check(Path::new(&workspace.worktree_path), "true").unwrap();
+        record_check(
+            &workspace,
+            &mut record,
+            "true".into(),
+            &passed,
+            "now".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            review_state(&workspace, &record).unwrap().stage,
+            ReviewStage::ReadyToLand
+        );
+
+        commit_all(Path::new(&workspace.worktree_path), "reviewed changes").unwrap();
+        let committed = review_state(&workspace, &record).unwrap();
+        assert_eq!(committed.stage, ReviewStage::ReadyToLand);
+        assert!(!committed.has_uncommitted_changes);
+
+        std::fs::write(&changed, "changed after checks\n").unwrap();
+        assert_eq!(
+            review_state(&workspace, &record).unwrap().stage,
+            ReviewStage::NeedsReview
+        );
+
+        let failed = run_check(Path::new(&workspace.worktree_path), "false").unwrap();
+        record_check(
+            &workspace,
+            &mut record,
+            "false".into(),
+            &failed,
+            "later".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            review_state(&workspace, &record).unwrap().stage,
+            ReviewStage::ChecksFailed
+        );
     }
 
     #[test]
@@ -610,6 +935,44 @@ mod tests {
         merge(&repo, "main", &ws.branch).unwrap();
 
         archive(&repo, &wt, &ws.branch, false).unwrap();
+        assert!(!wt.exists());
+        assert!(!branch_exists(&repo, &ws.branch));
+    }
+
+    #[test]
+    fn archive_unmerged_workspace_removes_worktree_and_retains_branch() {
+        let tmp = Tmp::new("archive-unmerged");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let wt_root = tmp.path().join("wts");
+        let ws = create(&repo, "main", "pr-work", &wt_root).unwrap();
+        let wt = Path::new(&ws.worktree_path).to_path_buf();
+
+        std::fs::write(wt.join("pr.txt"), "review me\n").unwrap();
+        run_git(&wt, &["add", "-A"]).unwrap();
+        run_git(&wt, &["commit", "-q", "-m", "pr work"]).unwrap();
+
+        archive(&repo, &wt, &ws.branch, false).unwrap();
+        assert!(!wt.exists());
+        assert!(
+            branch_exists(&repo, &ws.branch),
+            "unmerged PR branch must be retained"
+        );
+    }
+
+    #[test]
+    fn rollback_create_removes_failed_workspace_and_branch() {
+        let tmp = Tmp::new("rollback-create");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let wt_root = tmp.path().join("wts");
+        let ws = create(&repo, "main", "failed-setup", &wt_root).unwrap();
+        let wt = Path::new(&ws.worktree_path).to_path_buf();
+        std::fs::write(wt.join("setup-artifact.txt"), "partial\n").unwrap();
+
+        rollback_create(&repo, &wt, &ws.branch).unwrap();
         assert!(!wt.exists());
         assert!(!branch_exists(&repo, &ws.branch));
     }

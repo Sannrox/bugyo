@@ -11,6 +11,7 @@ vi.mock("./lib/ipc", () => ({
 }));
 
 const ws = (branch: string, repo: string): Workspace => ({
+  task: branch,
   repoRoot: repo,
   baseBranch: "main",
   branch,
@@ -36,9 +37,24 @@ describe("CommandPalette", () => {
 
     render(<CommandPalette onClose={() => {}} />);
     const list = screen.getByRole("listbox");
-    expect(list).toHaveTextContent("New session");
+    expect(list).toHaveTextContent("New task");
     expect(list).toHaveTextContent("Fleet overview");
+    expect(list).toHaveTextContent("Search sessions and transcripts");
+    expect(list).toHaveTextContent("Event history");
     expect(list).toHaveTextContent("Go to feat-a");
+  });
+
+  it("uses the human-assigned session name in jump commands", () => {
+    const { addSession, renameSession } = useFleet.getState();
+    addSession({ sessionId: "a", workspace: ws("feat-a", "/repo1") });
+    renameSession("a", "Login accessibility");
+
+    render(<CommandPalette onClose={() => {}} />);
+
+    expect(screen.getByRole("listbox")).toHaveTextContent(
+      "Go to Login accessibility",
+    );
+    expect(screen.getByRole("listbox")).not.toHaveTextContent("Go to feat-a");
   });
 
   it("filters commands by query", () => {
@@ -76,5 +92,32 @@ describe("CommandPalette", () => {
     render(<CommandPalette onClose={onClose} />);
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("contains keyboard focus and restores the previous control on close", () => {
+    const trigger = document.createElement("button");
+    trigger.textContent = "Open commands";
+    document.body.append(trigger);
+    trigger.focus();
+
+    const { unmount } = render(<CommandPalette onClose={() => {}} />);
+    const input = screen.getByRole("combobox");
+    expect(input).toHaveFocus();
+
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(input).toHaveFocus();
+
+    unmount();
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
+  it("does not reference a missing active option for an empty result", () => {
+    render(<CommandPalette onClose={() => {}} />);
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "no such command xyz" } });
+
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(input).not.toHaveAttribute("aria-activedescendant");
   });
 });

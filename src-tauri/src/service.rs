@@ -48,6 +48,46 @@ struct TauriEventSink {
     spent: Arc<std::sync::Mutex<HashMap<String, f64>>>,
 }
 
+/// Filters history notifications replayed by ACP `session/load`. The frontend
+/// has already restored that transcript from Bugyo's durable store, so
+/// forwarding the replay would duplicate every message and recount historical
+/// credits. Capability/error/permission state remains live, and the gate is
+/// opened immediately after `session/load` completes for the new turn.
+struct ResumeEventSink {
+    inner: Arc<dyn EventSink>,
+    replaying: AtomicBool,
+}
+
+impl ResumeEventSink {
+    fn new(inner: Arc<dyn EventSink>) -> Self {
+        Self {
+            inner,
+            replaying: AtomicBool::new(true),
+        }
+    }
+
+    fn finish_replay(&self) {
+        self.replaying.store(false, Ordering::Release);
+    }
+}
+
+impl EventSink for ResumeEventSink {
+    fn emit(&self, event: AcpEvent) {
+        if self.replaying.load(Ordering::Acquire)
+            && matches!(
+                &event,
+                AcpEvent::AgentMessage { .. }
+                    | AcpEvent::AgentThought { .. }
+                    | AcpEvent::ToolCall { .. }
+                    | AcpEvent::Metrics { .. }
+            )
+        {
+            return;
+        }
+        self.inner.emit(event);
+    }
+}
+
 impl EventSink for TauriEventSink {
     fn emit(&self, event: AcpEvent) {
         // Accumulate credit spend so the dispatch path can enforce budget caps.
@@ -71,6 +111,8 @@ struct SessionEntry {
     /// Args to (re)spawn `kiro-cli acp` for this session.
     args: Vec<String>,
     workspace: Option<Workspace>,
+    /// Durable backend-owned review/check/landing state for workspaces.
+    review: workspace::ReviewRecord,
     /// Name used for the worker/queue files (branch, or session id).
     worker_name: String,
     repo: String,
@@ -214,18 +256,21 @@ impl AcpManager {
             .get()
             .ok_or("app handle not initialised")?
             .clone();
-        let sink = Arc::new(TauriEventSink {
+        let sink: Arc<dyn EventSink> = Arc::new(TauriEventSink {
             app,
             spent: self.inner.spent.clone(),
         });
+        let resume_sink = Arc::new(ResumeEventSink::new(sink));
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let program = crate::acp::resolve_kiro_cli();
-        let client = AcpClient::spawn(program, &arg_refs, sink).map_err(|e| e.to_string())?;
+        let client =
+            AcpClient::spawn(program, &arg_refs, resume_sink.clone()).map_err(|e| e.to_string())?;
         client.initialize().await.map_err(|e| e.to_string())?;
         client
             .load_session(session_id, &cwd)
             .await
             .map_err(|e| e.to_string())?;
+        resume_sink.finish_replay();
         let client = Arc::new(client);
 
         let mut guard = self.inner.sessions.lock().await;
@@ -275,6 +320,46 @@ impl AcpManager {
             .ok_or_else(|| format!("no workspace session: {session_id}"))
     }
 
+    async fn review_record_of(&self, session_id: &str) -> Result<workspace::ReviewRecord, String> {
+        self.inner
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|entry| entry.review.clone())
+            .ok_or_else(|| format!("unknown session: {session_id}"))
+    }
+
+    /// Update review state in memory and in the persisted session descriptor.
+    async fn save_review_record(
+        &self,
+        session_id: &str,
+        review: workspace::ReviewRecord,
+    ) -> Result<(), String> {
+        let persisted = {
+            let mut guard = self.inner.sessions.lock().await;
+            let entry = guard
+                .get_mut(session_id)
+                .ok_or_else(|| format!("unknown session: {session_id}"))?;
+            entry.review = review.clone();
+            config::PersistedSession {
+                session_id: session_id.to_string(),
+                repo: entry.repo.clone(),
+                workspace: entry
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| serde_json::to_value(workspace).ok()),
+                review: serde_json::to_value(review).ok(),
+                worker_name: entry.worker_name.clone(),
+                args: entry.args.clone(),
+                command: entry.command.clone(),
+                created: entry.created.clone(),
+                automation_id: entry.automation_id.clone(),
+            }
+        };
+        config::save_session(&config::config_home(), &persisted).map_err(|error| error.to_string())
+    }
+
     /// Emit the current queue depth for a session.
     async fn emit_queue(&self, session_id: &str) {
         let depth = match self.worker_name(session_id).await {
@@ -319,6 +404,38 @@ impl AcpManager {
         }
         self.emit_queue(session_id).await;
         self.dispatch_one(session_id).await;
+        Ok(())
+    }
+
+    /// Read the ordered durable queue for a session.
+    pub async fn queue_tasks(&self, session_id: &str) -> Result<Vec<String>, String> {
+        let name = self
+            .worker_name(session_id)
+            .await
+            .ok_or_else(|| format!("no session: {session_id}"))?;
+        let lock = self.queue_lock(&name).await;
+        let _queue_guard = lock.lock().await;
+        state::read_queue(&state::orch_home(), &name).map_err(|error| error.to_string())
+    }
+
+    /// Replace a session queue while holding the same lock used by heartbeat
+    /// dispatch, so UI edits cannot race a pop/append and lose work.
+    pub async fn replace_queue(&self, session_id: &str, tasks: Vec<String>) -> Result<(), String> {
+        let name = self
+            .worker_name(session_id)
+            .await
+            .ok_or_else(|| format!("no session: {session_id}"))?;
+        let lock = self.queue_lock(&name).await;
+        let queue_guard = lock.lock().await;
+        state::replace_queue(&state::orch_home(), &name, &tasks)
+            .map_err(|error| error.to_string())?;
+        drop(queue_guard);
+        self.emit_queue(session_id).await;
+        self.log(&format!(
+            "queue edited -> {session_id}: {} task(s)",
+            tasks.iter().filter(|task| !task.trim().is_empty()).count()
+        ))
+        .await;
         Ok(())
     }
 
@@ -955,6 +1072,7 @@ impl AcpManager {
             workspace: workspace
                 .as_ref()
                 .and_then(|w| serde_json::to_value(w).ok()),
+            review: serde_json::to_value(workspace::ReviewRecord::default()).ok(),
             worker_name: worker_name.clone(),
             args: args.clone(),
             command: command.clone(),
@@ -969,6 +1087,7 @@ impl AcpManager {
                 client: Some(client),
                 args,
                 workspace,
+                review: workspace::ReviewRecord::default(),
                 worker_name,
                 repo,
                 command,
@@ -996,12 +1115,17 @@ impl AcpManager {
             let workspace = s
                 .workspace
                 .and_then(|v| serde_json::from_value::<Workspace>(v).ok());
+            let review = s
+                .review
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
             guard.insert(
                 s.session_id.clone(),
                 SessionEntry {
                     client: None,
                     args: s.args,
                     workspace,
+                    review,
                     // Re-derive the queue key from the session id rather than
                     // trusting the persisted `worker_name`, which may be an old
                     // branch-keyed value from before the collision fix.
@@ -1031,6 +1155,10 @@ pub struct WorkspaceSession {
 pub struct SessionInfo {
     session_id: String,
     workspace: Option<Workspace>,
+    review: Option<workspace::ReviewState>,
+    /// Whether an ACP process is currently attached. Hydrated sessions are
+    /// intentionally cold after restart and must not be presented as idle.
+    connected: bool,
     /// The session's working directory (project path or worktree).
     repo: String,
     queued: usize,
@@ -1054,12 +1182,15 @@ fn trust_args(trust: &config::TrustMode) -> (bool, Vec<String>) {
     match trust {
         config::TrustMode::Ask => (false, Vec::new()),
         config::TrustMode::TrustTools { tools } => (false, tools.clone()),
-        config::TrustMode::TrustAll => (true, Vec::new()),
+        // Legacy configs may still contain TrustAll. Downgrade them to the
+        // approval-required default: destructive tools must never bypass the
+        // owner decision surface.
+        config::TrustMode::TrustAll => (false, Vec::new()),
     }
 }
 
 fn build_args(
-    trust_all: bool,
+    _trust_all: bool,
     trust_tools: Vec<String>,
     agent: Option<String>,
     model: Option<String>,
@@ -1073,18 +1204,19 @@ fn build_args(
         args.push("--model".to_string());
         args.push(m.trim().to_string());
     }
-    if trust_all {
-        args.push("--trust-all-tools".to_string());
-    } else {
-        let tools: Vec<String> = trust_tools
-            .into_iter()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        if !tools.is_empty() {
-            args.push("--trust-tools".to_string());
-            args.push(tools.join(","));
-        }
+    let tools: Vec<String> = trust_tools
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| {
+            !t.is_empty()
+                && !config::ALWAYS_ASK_TOOLS
+                    .iter()
+                    .any(|always_ask| t == always_ask)
+        })
+        .collect();
+    if !tools.is_empty() {
+        args.push("--trust-tools".to_string());
+        args.push(tools.join(","));
     }
     args
 }
@@ -1187,8 +1319,21 @@ pub async fn workspace_create(
         let ws =
             workspace::create(&repo, &base_branch, &task, &wt_root).map_err(|e| e.to_string())?;
         if let Some(script) = setup_script {
-            workspace::run_setup_script(PathBuf::from(&ws.worktree_path).as_path(), &script)
-                .map_err(|e| e.to_string())?;
+            if let Err(error) =
+                workspace::run_setup_script(PathBuf::from(&ws.worktree_path).as_path(), &script)
+            {
+                let cleanup = workspace::rollback_create(
+                    PathBuf::from(&ws.repo_root).as_path(),
+                    PathBuf::from(&ws.worktree_path).as_path(),
+                    &ws.branch,
+                );
+                return Err(match cleanup {
+                    Ok(()) => error.to_string(),
+                    Err(cleanup_error) => {
+                        format!("{error}; failed to roll back workspace: {cleanup_error}")
+                    }
+                });
+            }
         }
         Ok(ws)
     })
@@ -1197,7 +1342,31 @@ pub async fn workspace_create(
 
     let args = build_args(trust_all, trust_tools, agent, model);
     let (client, id) =
-        start_client(&app, &ws.worktree_path, &args, manager.inner.spent.clone()).await?;
+        match start_client(&app, &ws.worktree_path, &args, manager.inner.spent.clone()).await {
+            Ok(started) => started,
+            Err(error) => {
+                let failed_ws = ws.clone();
+                let cleanup = match tokio::task::spawn_blocking(move || {
+                    workspace::rollback_create(
+                        PathBuf::from(&failed_ws.repo_root).as_path(),
+                        PathBuf::from(&failed_ws.worktree_path).as_path(),
+                        &failed_ws.branch,
+                    )
+                    .map_err(|cleanup_error| cleanup_error.to_string())
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(join_error) => Err(format!("rollback task failed: {join_error}")),
+                };
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => {
+                        format!("{error}; failed to roll back workspace: {cleanup_error}")
+                    }
+                });
+            }
+        };
     manager
         .insert(
             id.clone(),
@@ -1224,6 +1393,25 @@ pub async fn orch_enqueue(
     text: String,
 ) -> Result<(), String> {
     manager.enqueue(&session_id, &text).await
+}
+
+/// Read a session's durable queued prompts in dispatch order.
+#[tauri::command]
+pub async fn orch_queue(
+    manager: State<'_, AcpManager>,
+    session_id: String,
+) -> Result<Vec<String>, String> {
+    manager.queue_tasks(&session_id).await
+}
+
+/// Replace a session's durable queue with an explicitly ordered list.
+#[tauri::command]
+pub async fn orch_queue_replace(
+    manager: State<'_, AcpManager>,
+    session_id: String,
+    tasks: Vec<String>,
+) -> Result<(), String> {
+    manager.replace_queue(&session_id, tasks).await
 }
 
 /// Dry-run: report what the next heartbeat pass would dispatch.
@@ -1254,6 +1442,24 @@ pub fn project_list() -> Result<Vec<config::Project>, String> {
 #[tauri::command]
 pub fn project_add(path: String) -> Result<config::Project, String> {
     config::add_project(&config::config_home(), &path).map_err(|e| e.to_string())
+}
+
+/// Persist the workspace setup/check defaults for a registered project.
+#[tauri::command]
+pub fn project_update(
+    path: String,
+    base_branch: String,
+    setup_script: String,
+    check_script: String,
+) -> Result<config::Project, String> {
+    config::update_project(
+        &config::config_home(),
+        &path,
+        &base_branch,
+        &setup_script,
+        &check_script,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Remove a registered project by path.
@@ -1501,25 +1707,57 @@ pub async fn acp_respond_permission(
     client
         .respond_permission(&request_id, &option_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    manager
+        .log(&format!(
+            "approval -> {session_id}: request {request_id}, decision {option_id}"
+        ))
+        .await;
+    Ok(())
 }
 
 /// List active sessions (id + optional workspace + queue depth).
 #[tauri::command]
 pub async fn acp_list_sessions(manager: State<'_, AcpManager>) -> Result<Vec<SessionInfo>, String> {
     let home = state::orch_home();
-    let guard = manager.inner.sessions.lock().await;
-    Ok(guard
-        .iter()
-        .map(|(id, entry)| SessionInfo {
-            session_id: id.clone(),
-            workspace: entry.workspace.clone(),
-            repo: entry.repo.clone(),
-            queued: state::read_queue(&home, &entry.worker_name)
-                .map(|q| q.len())
+    let entries = {
+        let guard = manager.inner.sessions.lock().await;
+        guard
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    id.clone(),
+                    entry.workspace.clone(),
+                    entry.review.clone(),
+                    entry.repo.clone(),
+                    entry.worker_name.clone(),
+                    entry.client.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut sessions = Vec::with_capacity(entries.len());
+    for (session_id, workspace, review_record, repo, worker_name, connected) in entries {
+        let review = if let Some(ws) = workspace.clone() {
+            tokio::task::spawn_blocking(move || workspace::review_state(&ws, &review_record))
+                .await
+                .ok()
+                .and_then(Result::ok)
+        } else {
+            None
+        };
+        sessions.push(SessionInfo {
+            session_id,
+            workspace,
+            review,
+            connected,
+            repo,
+            queued: state::read_queue(&home, &worker_name)
+                .map(|queue| queue.len())
                 .unwrap_or(0),
-        })
-        .collect())
+        });
+    }
+    Ok(sessions)
 }
 
 /// Close a session: release its `kiro-cli acp` process but **keep** the session
@@ -1544,6 +1782,9 @@ pub async fn acp_delete_session(
     let _ = config::remove_session(&config::config_home(), &session_id);
     let _ = config::remove_session_meta(&config::config_home(), &session_id);
     manager.forget_spend(&session_id);
+    manager
+        .log(&format!("delete -> {session_id}: session removed"))
+        .await;
     Ok(())
 }
 
@@ -1571,6 +1812,9 @@ pub async fn workspace_archive(
     let _ = config::remove_session(&config::config_home(), &session_id);
     let _ = config::remove_session_meta(&config::config_home(), &session_id);
     manager.forget_spend(&session_id);
+    manager
+        .log(&format!("archive -> {session_id}: workspace retired"))
+        .await;
     Ok(())
 }
 
@@ -1593,6 +1837,20 @@ pub async fn workspace_diff(
     .map_err(|e| e.to_string())?
 }
 
+/// Backend-derived, durable review/check/landing state for a workspace.
+#[tauri::command]
+pub async fn workspace_review_state(
+    manager: State<'_, AcpManager>,
+    session_id: String,
+) -> Result<workspace::ReviewState, String> {
+    let ws = manager.workspace_of(&session_id).await?;
+    let record = manager.review_record_of(&session_id).await?;
+    tokio::task::spawn_blocking(move || workspace::review_state(&ws, &record))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
 /// Run a check/run script in the workspace's worktree; returns pass/fail+output.
 #[tauri::command]
 pub async fn workspace_check(
@@ -1601,12 +1859,51 @@ pub async fn workspace_check(
     script: String,
 ) -> Result<workspace::CheckResult, String> {
     let ws = manager.workspace_of(&session_id).await?;
-    tokio::task::spawn_blocking(move || {
-        workspace::run_check(PathBuf::from(&ws.worktree_path).as_path(), &script)
-            .map_err(|e| e.to_string())
+    let check_ws = ws.clone();
+    let check_script = script.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        workspace::run_check(
+            PathBuf::from(&check_ws.worktree_path).as_path(),
+            &check_script,
+        )
+        .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    let mut record = manager.review_record_of(&session_id).await?;
+    workspace::record_check(&ws, &mut record, script, &result, state::now_ts())
+        .map_err(|error| error.to_string())?;
+    manager.save_review_record(&session_id, record).await?;
+    manager
+        .log(&format!(
+            "check -> {session_id}: {} (exit {})",
+            if result.success { "passed" } else { "failed" },
+            result.exit_code
+        ))
+        .await;
+    Ok(result)
+}
+
+/// Commit every reviewed workspace change using the human task as the message.
+#[tauri::command]
+pub async fn workspace_commit(
+    manager: State<'_, AcpManager>,
+    session_id: String,
+    message: String,
+) -> Result<(), String> {
+    let ws = manager.workspace_of(&session_id).await?;
+    let path = PathBuf::from(&ws.worktree_path);
+    tokio::task::spawn_blocking(move || {
+        workspace::commit_all(path.as_path(), &message).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    manager
+        .log(&format!(
+            "commit -> {session_id}: reviewed workspace changes"
+        ))
+        .await;
+    Ok(())
 }
 
 /// Merge the workspace's branch into the base repo's current branch (--no-ff).
@@ -1616,9 +1913,25 @@ pub async fn workspace_merge(
     session_id: String,
 ) -> Result<(), String> {
     let ws = manager.workspace_of(&session_id).await?;
+    let review_record = manager.review_record_of(&session_id).await?;
     let branch = ws.branch.clone();
     let msg = format!("merge {branch}");
     tokio::task::spawn_blocking(move || {
+        let review_state =
+            workspace::review_state(&ws, &review_record).map_err(|error| error.to_string())?;
+        if review_state.stage != workspace::ReviewStage::ReadyToLand {
+            return Err(
+                "workspace is not ready to land; run checks against the current changes first"
+                    .to_string(),
+            );
+        }
+        if workspace::is_dirty(PathBuf::from(&ws.worktree_path).as_path())
+            .map_err(|e| e.to_string())?
+        {
+            return Err(
+                "workspace has uncommitted changes; commit them before merging".to_string(),
+            );
+        }
         workspace::merge(
             PathBuf::from(&ws.repo_root).as_path(),
             &ws.base_branch,
@@ -1628,6 +1941,9 @@ pub async fn workspace_merge(
     })
     .await
     .map_err(|e| e.to_string())??;
+    let mut review = manager.review_record_of(&session_id).await?;
+    review.landing = Some(workspace::LandingState::Merged);
+    manager.save_review_record(&session_id, review).await?;
     let _ = state::append_log(&state::orch_home(), &msg);
     Ok(())
 }
@@ -1660,7 +1976,24 @@ pub async fn workspace_open_pr(
     title: Option<String>,
 ) -> Result<String, String> {
     let ws = manager.workspace_of(&session_id).await?;
-    tokio::task::spawn_blocking(move || {
+    let review_record = manager.review_record_of(&session_id).await?;
+    let url = tokio::task::spawn_blocking(move || {
+        let review_state =
+            workspace::review_state(&ws, &review_record).map_err(|error| error.to_string())?;
+        if review_state.stage != workspace::ReviewStage::ReadyToLand {
+            return Err(
+                "workspace is not ready to land; run checks against the current changes first"
+                    .to_string(),
+            );
+        }
+        if workspace::is_dirty(PathBuf::from(&ws.worktree_path).as_path())
+            .map_err(|e| e.to_string())?
+        {
+            return Err(
+                "workspace has uncommitted changes; commit them before opening a pull request"
+                    .to_string(),
+            );
+        }
         workspace::open_pr(
             PathBuf::from(&ws.repo_root).as_path(),
             &ws.branch,
@@ -1669,7 +2002,14 @@ pub async fn workspace_open_pr(
         .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    let mut review = manager.review_record_of(&session_id).await?;
+    review.landing = Some(workspace::LandingState::PullRequest { url: url.clone() });
+    manager.save_review_record(&session_id, review).await?;
+    manager
+        .log(&format!("pull request -> {session_id}: {url}"))
+        .await;
+    Ok(url)
 }
 
 /// Spawn the in-app heartbeat: a periodic pass that drains queued work to idle
@@ -1727,6 +2067,7 @@ impl AcpManager {
                 client: None,
                 args: vec!["acp".to_string()],
                 workspace: None,
+                review: workspace::ReviewRecord::default(),
                 worker_name: worker_name.to_string(),
                 repo: "/tmp/repo".to_string(),
                 command: "kiro-cli acp".to_string(),
@@ -1751,6 +2092,7 @@ impl AcpManager {
                 client: None,
                 args: vec!["acp".to_string()],
                 workspace: None,
+                review: workspace::ReviewRecord::default(),
                 worker_name: worker_name.to_string(),
                 repo: "/tmp/repo".to_string(),
                 command: "kiro-cli acp".to_string(),
@@ -1772,6 +2114,7 @@ impl AcpManager {
         repo_root: &str,
     ) {
         let workspace = Workspace {
+            task: branch.to_string(),
             repo_root: repo_root.to_string(),
             base_branch: "main".to_string(),
             branch: branch.to_string(),
@@ -1783,6 +2126,7 @@ impl AcpManager {
                 client: None,
                 args: vec!["acp".to_string()],
                 workspace: Some(workspace),
+                review: workspace::ReviewRecord::default(),
                 worker_name: worker_key(session_id),
                 repo: repo_root.to_string(),
                 command: "kiro-cli acp".to_string(),
@@ -1798,6 +2142,15 @@ impl AcpManager {
 mod tests {
     use super::*;
     use crate::config::{Automation, AutomationTarget, Schedule, TrustMode};
+
+    #[derive(Default)]
+    struct CaptureSink(std::sync::Mutex<Vec<AcpEvent>>);
+
+    impl EventSink for CaptureSink {
+        fn emit(&self, event: AcpEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
 
     struct Tmp(PathBuf);
     impl Tmp {
@@ -1824,10 +2177,6 @@ mod tests {
         }
     }
 
-    fn trust_all_widens() -> bool {
-        matches!(trust_args(&TrustMode::TrustAll), (true, _))
-    }
-
     #[test]
     fn trust_args_maps_modes() {
         assert_eq!(trust_args(&TrustMode::Ask), (false, Vec::<String>::new()));
@@ -1837,7 +2186,73 @@ mod tests {
             }),
             (false, vec!["fs_read".to_string(), "fs_write".to_string()])
         );
-        assert!(trust_all_widens());
+        assert_eq!(
+            trust_args(&TrustMode::TrustAll),
+            (false, Vec::<String>::new())
+        );
+        assert_eq!(
+            build_args(
+                true,
+                vec!["fs_read".into(), "fs_write".into(), "execute_bash".into()],
+                None,
+                None,
+            ),
+            vec!["acp", "--trust-tools", "fs_read"]
+        );
+    }
+
+    #[test]
+    fn resume_sink_suppresses_replayed_history_and_metrics_only_until_loaded() {
+        let captured = Arc::new(CaptureSink::default());
+        let inner: Arc<dyn EventSink> = captured.clone();
+        let sink = ResumeEventSink::new(inner);
+
+        sink.emit(AcpEvent::AgentMessage {
+            session_id: "s1".into(),
+            text: "old answer".into(),
+        });
+        sink.emit(AcpEvent::AgentThought {
+            session_id: "s1".into(),
+            text: "old reasoning".into(),
+        });
+        sink.emit(AcpEvent::ToolCall {
+            session_id: "s1".into(),
+            tool_call_id: "t1".into(),
+            title: "old tool".into(),
+            status: Some("completed".into()),
+            diff: None,
+            output: None,
+        });
+        sink.emit(AcpEvent::Metrics {
+            session_id: "s1".into(),
+            context_percent: Some(42.0),
+            credits: Some(3.0),
+            turn_duration_ms: Some(100),
+        });
+        sink.emit(AcpEvent::Error {
+            message: "load warning".into(),
+        });
+
+        let during = captured.0.lock().unwrap().clone();
+        assert_eq!(during.len(), 1);
+        assert!(matches!(&during[0], AcpEvent::Error { .. }));
+
+        sink.finish_replay();
+        sink.emit(AcpEvent::AgentMessage {
+            session_id: "s1".into(),
+            text: "fresh answer".into(),
+        });
+        sink.emit(AcpEvent::Metrics {
+            session_id: "s1".into(),
+            context_percent: Some(43.0),
+            credits: Some(0.5),
+            turn_duration_ms: Some(50),
+        });
+
+        let after = captured.0.lock().unwrap();
+        assert_eq!(after.len(), 3);
+        assert!(matches!(&after[1], AcpEvent::AgentMessage { .. }));
+        assert!(matches!(&after[2], AcpEvent::Metrics { .. }));
     }
 
     // Fix #1: two sessions sharing a branch name across different repos must

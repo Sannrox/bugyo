@@ -6,11 +6,14 @@ import { useSettings } from "./lib/settingsStore";
 
 vi.mock("./lib/ipc", () => ({
   orchEnqueue: vi.fn(async () => {}),
+  orchQueue: vi.fn(async () => []),
+  orchQueueReplace: vi.fn(async () => {}),
   acpCloseSession: vi.fn(async () => {}),
   acpDeleteSession: vi.fn(async () => {}),
   acpPromptWithScreenshot: vi.fn(async () => "end_turn"),
   acpRespondPermission: vi.fn(async () => {}),
   workspaceArchive: vi.fn(async () => {}),
+  workspaceCommit: vi.fn(async () => {}),
   confirmDialog: vi.fn(async () => true),
   notify: vi.fn(async () => {}),
   sessionTranscript: vi.fn(async () => []),

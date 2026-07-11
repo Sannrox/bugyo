@@ -313,10 +313,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "requires an interactive macOS display"]
     fn capture_full_screen_produces_png() {
-        // Integration: exercises the real `screencapture`. Produces a valid PNG
-        // even without Screen Recording permission (desktop pixels), so this is
-        // safe in CI on macOS. Skipped on non-macOS by the cfg gate.
+        // Live integration: exercises the real `screencapture`. Headless and
+        // background desktop sessions can have no capturable display, so keep
+        // this out of the deterministic default suite.
         let img = capture(&ScreenshotOpts::default()).expect("capture");
         assert_eq!(img.mime_type, "image/png");
         assert!(img.bytes > 0);
