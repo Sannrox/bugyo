@@ -201,6 +201,48 @@ describe("SessionPane — capabilities reference panel", () => {
   });
 });
 
+describe("SessionPane — compact split header", () => {
+  beforeEach(() => {
+    seedSession();
+    useFleet.getState().addSession({ sessionId: "s2" });
+    useFleet.getState().setActive("s1");
+    useFleet.getState().openSplit("s2");
+  });
+
+  it("keeps lifecycle actions in the overflow menu", () => {
+    const { container } = render(<SessionPane sessionId="s1" />);
+
+    expect(container.querySelector(".pane--split")).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /close split view/i }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: /stop agent/i })).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /more session actions/i }),
+    );
+
+    expect(
+      screen.getByRole("menuitem", { name: /close split view/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: /stop agent/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("closes split view from the overflow action", () => {
+    render(<SessionPane sessionId="s1" />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /more session actions/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: /close split view/i }),
+    );
+
+    expect(useFleet.getState().secondaryId).toBeNull();
+  });
+});
+
 describe("SessionPane — per-message actions", () => {
   beforeEach(seedSession);
 

@@ -108,7 +108,7 @@ vi.mock("./lib/ipc", () => ({
 import Fleet from "./Fleet";
 
 async function createWorkspace(repo: string, task: string) {
-  fireEvent.click(screen.getByRole("button", { name: /new task/i }));
+  fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
   // The project must be registered (seeded via the projectList mock).
   await screen.findByRole("option", { name: "repo1" });
   fireEvent.change(screen.getByLabelText("project"), {
@@ -231,13 +231,13 @@ describe("Fleet", () => {
       expect(text).toContain("from B");
     });
 
-    // Unsplit stays visible in both pane headers so it cannot be hidden behind
-    // transcript or review content.
-    expect(
-      screen.getAllByRole("button", { name: /close split view/i }),
-    ).toHaveLength(2);
+    // Secondary lifecycle actions stay available without crowding the compact
+    // split header.
     fireEvent.click(
-      screen.getAllByRole("button", { name: /close split view/i })[0],
+      screen.getAllByRole("button", { name: /more session actions/i })[0],
+    );
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: /close split view/i }),
     );
     await waitFor(() =>
       expect(screen.getAllByLabelText("transcript")).toHaveLength(1),
@@ -571,9 +571,12 @@ describe("Fleet", () => {
     await createWorkspace("/repo1", "feat a");
     await screen.findByRole("button", { name: /feat-a/i });
 
-    // Stop is persistent in the pane header. It releases the process but keeps
-    // the session in the sidebar.
-    fireEvent.click(screen.getByRole("button", { name: /stop agent/i }));
+    // Stop lives in the pane overflow. It releases the process but keeps the
+    // session in the sidebar.
+    fireEvent.click(
+      screen.getByRole("button", { name: /more session actions/i }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: /stop agent/i }));
     const { acpCloseSession, acpDeleteSession } = await import("./lib/ipc");
     await waitFor(() => expect(acpCloseSession).toHaveBeenCalledWith("sess-a"));
     expect(useFleet.getState().sessions["sess-a"].state.status).toBe(

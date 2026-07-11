@@ -54,6 +54,7 @@ export interface FleetStore {
     | "automations"
     | "settings"
     | "fleet"
+    | "plugins"
     | "search"
     | "eventlog"
     | null;
@@ -86,6 +87,7 @@ export interface FleetStore {
   openAutomations: () => void;
   openSettings: () => void;
   openFleet: () => void;
+  openPlugins: () => void;
   openSearch: () => void;
   openEventLog: () => void;
   setQueued: (sessionId: string, queued: number) => void;
@@ -231,6 +233,8 @@ export const useFleet = create<FleetStore>((set, get) => ({
   openSettings: () => set({ panel: "settings" }),
 
   openFleet: () => set({ panel: "fleet" }),
+
+  openPlugins: () => set({ panel: "plugins" }),
 
   openSearch: () => set({ panel: "search" }),
 

@@ -7,6 +7,8 @@ import {
   GitCommitHorizontal,
   GitMerge,
   GitPullRequest,
+  Maximize2,
+  Minimize2,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -44,9 +46,15 @@ const STAGE_LABEL: Record<ReviewStage, string> = {
 export default function ReviewPanel({
   sessionId,
   onClose,
+  expanded = false,
+  onToggleExpanded,
+  fixture,
 }: {
   sessionId: string;
   onClose?: () => void;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
+  fixture?: { review: WorkspaceReviewState; diff: string };
 }) {
   const storedReview = useFleet(
     (state) => state.sessions[sessionId]?.review ?? null,
@@ -66,9 +74,9 @@ export default function ReviewPanel({
     return workspace?.task || workspace?.branch || "Bugyo workspace changes";
   });
   const [review, setReview] = useState<WorkspaceReviewState | null>(
-    storedReview,
+    fixture?.review ?? storedReview,
   );
-  const [diff, setDiff] = useState<string | null>(null);
+  const [diff, setDiff] = useState<string | null>(fixture?.diff ?? null);
   const [check, setCheck] = useState<CheckResult | null>(null);
   const [preview, setPreview] = useState<MergePreview | null>(null);
   const [busy, setBusy] = useState(false);
@@ -117,6 +125,7 @@ export default function ReviewPanel({
   }
 
   useEffect(() => {
+    if (fixture) return;
     let active = true;
     Promise.all([
       workspaceReviewState(sessionId),
@@ -136,7 +145,7 @@ export default function ReviewPanel({
     return () => {
       active = false;
     };
-  }, [sessionId, setStoredReview]);
+  }, [fixture, sessionId, setStoredReview]);
 
   async function rerunChecks() {
     if (!checkScript.trim()) return;
@@ -280,6 +289,21 @@ export default function ReviewPanel({
           </span>
         </div>
         <div className="review-inspector__header-actions">
+          {onToggleExpanded && (
+            <button
+              type="button"
+              className="review-inspector__icon-button"
+              aria-label={expanded ? "restore split review" : "expand review"}
+              title={expanded ? "Restore split review" : "Expand review"}
+              onClick={onToggleExpanded}
+            >
+              {expanded ? (
+                <Minimize2 size={14} aria-hidden />
+              ) : (
+                <Maximize2 size={14} aria-hidden />
+              )}
+            </button>
+          )}
           <button
             type="button"
             className="review-inspector__icon-button"

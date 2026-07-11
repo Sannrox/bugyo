@@ -4,13 +4,13 @@ import {
   ArrowUp,
   Brain,
   Camera,
+  ChevronDown,
   Copy,
   GitBranch,
   MoreHorizontal,
   RotateCcw,
   Square,
   SquareTerminal,
-  X,
 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -28,6 +28,7 @@ import { useFleet } from "./lib/fleetStore";
 import { useSettings } from "./lib/settingsStore";
 import { DISPLAY_STATUS_LABEL, effectiveStatus } from "./lib/review";
 import type { TranscriptEntry } from "./lib/session";
+import type { WorkspaceReviewState } from "./lib/bindings";
 import ReviewPanel from "./ReviewPanel";
 import QueuePanel from "./QueuePanel";
 import { InlineDiff } from "./DiffView";
@@ -149,7 +150,15 @@ function ToolGroup({ tools }: { tools: ToolEntry[] }) {
 }
 
 /** The main pane for a single session, selected from the fleet store by id. */
-export default function SessionPane({ sessionId }: { sessionId: string }) {
+export default function SessionPane({
+  sessionId,
+  initialReviewOpen = false,
+  reviewFixture,
+}: {
+  sessionId: string;
+  initialReviewOpen?: boolean;
+  reviewFixture?: { review: WorkspaceReviewState; diff: string };
+}) {
   // Subscribe only to this session — a busy sibling won't re-render this pane.
   const session = useFleet((s) => s.sessions[sessionId]);
   const state = session?.state;
@@ -166,7 +175,8 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [permissionChoice, setPermissionChoice] = useState("");
   const [permissionError, setPermissionError] = useState("");
-  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(initialReviewOpen);
+  const [reviewExpanded, setReviewExpanded] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
@@ -288,10 +298,20 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   }, [blocks]);
 
   useEffect(() => {
-    if (stickToBottom.current && blocks.length > 0) {
+    if (!stickToBottom.current || blocks.length === 0) return;
+
+    // The responsive review view temporarily hides the conversation. Running
+    // scrollToIndex while its scroll element has zero height leaves a long
+    // transcript stranded at the beginning when review closes. Wait until the
+    // visibility/layout change has committed, then measure and pin the newest
+    // block. `reviewOpen` intentionally retriggers this after that transition.
+    const frame = requestAnimationFrame(() => {
+      if (!scrollRef.current || scrollRef.current.clientHeight === 0) return;
+      virtualizer.measure();
       virtualizer.scrollToIndex(blocks.length - 1, { align: "end" });
-    }
-  }, [blocks.length, lastBlockSignature, virtualizer]);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [blocks.length, lastBlockSignature, reviewOpen, virtualizer]);
 
   useEffect(() => {
     if (state?.pendingPermission) {
@@ -594,7 +614,7 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <section className="pane">
+    <section className={`pane${splitOpen ? " pane--split" : ""}`}>
       <header className="pane__header">
         <span className="pane__title">
           {session.workspace ? (
@@ -635,32 +655,6 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
           </span>
         )}
         <div className="pane__actions">
-          {splitOpen && (
-            <button
-              type="button"
-              className="pane__action pane__action--icon"
-              onClick={() => {
-                setMoreOpen(false);
-                closeSplit();
-              }}
-              aria-label="Close split view"
-              title="Close split view"
-            >
-              <X size={17} aria-hidden />
-            </button>
-          )}
-          {state.status !== "disconnected" && (
-            <button
-              type="button"
-              className="pane__action pane__action--stop"
-              onClick={() => void closeSession()}
-              aria-label="Stop agent"
-              title="Stop agent and keep the session resumable"
-            >
-              <Square size={14} aria-hidden />
-              <span>Stop</span>
-            </button>
-          )}
           {session.workspace && (
             <button
               type="button"
@@ -668,7 +662,10 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
               onClick={() => {
                 setMoreOpen(false);
                 setQueueOpen(false);
-                setReviewOpen((open) => !open);
+                setReviewOpen((open) => {
+                  if (open) setReviewExpanded(false);
+                  return !open;
+                });
               }}
             >
               {reviewOpen ? "Hide review" : "Review"}
@@ -769,7 +766,7 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
       )}
 
       <div
-        className={`pane__workspace${reviewOpen ? " pane__workspace--review" : ""}`}
+        className={`pane__workspace${reviewOpen ? " pane__workspace--review" : ""}${reviewExpanded ? " pane__workspace--review-expanded" : ""}`}
       >
         <div className="pane__conversation">
           {state.status === "disconnected" && !queueOpen && (
@@ -1013,6 +1010,18 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
                 }
               }}
             />
+            <div className="chatbox__meta" aria-label="session configuration">
+              <button
+                type="button"
+                className="chatbox__meta-btn"
+                title="Default permissions"
+              >
+                <Brain size={15} aria-hidden /> Default permissions{" "}
+                <ChevronDown size={13} aria-hidden />
+              </button>
+              <span className="chatbox__meta-spacer" />
+              <span className="chatbox__model">kiro-cli</span>
+            </div>
             {state.status === "working" && (
               <button
                 type="button"
@@ -1049,13 +1058,33 @@ export default function SessionPane({ sessionId }: { sessionId: string }) {
               {error}
             </p>
           )}
+          <div
+            className="chatbox__environment"
+            aria-label="workspace environment"
+          >
+            <SquareTerminal size={14} aria-hidden />
+            <span>{session.workspace ? "Work locally" : "Local session"}</span>
+            {session.workspace && (
+              <>
+                <span aria-hidden>·</span>
+                <GitBranch size={13} aria-hidden />
+                <span>{session.workspace.branch}</span>
+              </>
+            )}
+          </div>
         </div>
 
         {reviewOpen && session.workspace && (
           <aside className="pane__review" aria-label="review inspector">
             <ReviewPanel
               sessionId={sessionId}
-              onClose={() => setReviewOpen(false)}
+              expanded={reviewExpanded}
+              onToggleExpanded={() => setReviewExpanded((value) => !value)}
+              onClose={() => {
+                setReviewExpanded(false);
+                setReviewOpen(false);
+              }}
+              fixture={reviewFixture}
             />
           </aside>
         )}

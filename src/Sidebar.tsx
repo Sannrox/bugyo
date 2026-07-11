@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
-  Activity,
   Archive,
   ChevronDown,
   ChevronUp,
@@ -10,6 +9,7 @@ import {
   GitBranch,
   Inbox,
   LayoutGrid,
+  PackageOpen,
   MoreVertical,
   Pencil,
   Pin,
@@ -27,8 +27,6 @@ import {
   projectAdd,
   pickDirectory,
   messageDialog,
-  orchHeartbeatSecs,
-  orchPreview,
   workspaceArchive,
 } from "./lib/ipc";
 import { useFleet, type FleetStore } from "./lib/fleetStore";
@@ -233,6 +231,8 @@ export default function Sidebar() {
   const openSettings = useFleet((s) => s.openSettings);
   const openEventLog = useFleet((s) => s.openEventLog);
   const openFleet = useFleet((s) => s.openFleet);
+  const openPlugins = useFleet((s) => s.openPlugins);
+  const openSearch = useFleet((s) => s.openSearch);
   const addProjectToStore = useFleet((s) => s.addProject);
   const removeSession = useFleet((s) => s.removeSession);
   const togglePin = useFleet((s) => s.togglePin);
@@ -366,23 +366,30 @@ export default function Sidebar() {
   // with sessions that aren't registered, then plain sessions.
   const registered = new Set(projects.map((p) => p.path));
   const groups: { key: string; name: string; ids: string[] }[] = [];
+  const pinnedIds = structure
+    .map((entry) => entry.split(SEP)[0])
+    .filter((id) => pinnedOf.get(id));
 
   for (const p of projects) {
-    const ids = byRepo.get(p.path) ?? [];
+    const ids = (byRepo.get(p.path) ?? []).filter((id) => !pinnedOf.get(id));
     if (!q || p.name.toLowerCase().includes(q) || ids.length > 0) {
       groups.push({ key: p.path, name: p.name, ids });
     }
   }
   for (const [repo, ids] of byRepo) {
     if (repo !== NO_REPO && !registered.has(repo)) {
-      groups.push({ key: repo, name: repoLabel(repo), ids });
+      groups.push({
+        key: repo,
+        name: repoLabel(repo),
+        ids: ids.filter((id) => !pinnedOf.get(id)),
+      });
     }
   }
   if (byRepo.has(NO_REPO)) {
     groups.push({
       key: NO_REPO,
       name: "Plain sessions",
-      ids: byRepo.get(NO_REPO)!,
+      ids: byRepo.get(NO_REPO)!.filter((id) => !pinnedOf.get(id)),
     });
   }
 
@@ -398,43 +405,33 @@ export default function Sidebar() {
 
   return (
     <nav className="sidebar" aria-label="workspaces">
-      <div className="sidebar__brand" aria-label="Bugyo agent command center">
-        <span className="sidebar__brand-mark" aria-hidden>
-          奉
-        </span>
-        <span className="sidebar__brand-copy">
-          <strong>Bugyo</strong>
-          <small>Agent command</small>
-        </span>
-      </div>
-
       <button
         type="button"
         className={`sidebar__new${panel === null && activeId === null ? " sidebar__new--active" : ""}`}
         onClick={() => setActive(null)}
         aria-current={panel === null && activeId === null ? "page" : undefined}
       >
-        <Plus size={16} aria-hidden /> New task
+        <Plus size={16} aria-hidden /> New chat
       </button>
 
       <button
         type="button"
-        className={`sidebar__new${panel === "fleet" ? " sidebar__new--active" : ""}`}
-        onClick={() => openFleet()}
-        aria-label="fleet overview"
-        aria-current={panel === "fleet" ? "page" : undefined}
+        className={`sidebar__new${panel === "search" ? " sidebar__new--active" : ""}`}
+        onClick={() => openSearch()}
+        aria-label="search"
+        aria-current={panel === "search" ? "page" : undefined}
       >
-        <LayoutGrid size={16} aria-hidden /> Fleet
+        <LayoutGrid size={16} aria-hidden /> Search
       </button>
 
       <button
         type="button"
-        className={`sidebar__new${panel === "inbox" ? " sidebar__new--active" : ""}`}
-        onClick={() => openInbox()}
-        aria-label="attention inbox"
-        aria-current={panel === "inbox" ? "page" : undefined}
+        className={`sidebar__new${panel === "plugins" ? " sidebar__new--active" : ""}`}
+        onClick={() => openPlugins()}
+        aria-label="plugins"
+        aria-current={panel === "plugins" ? "page" : undefined}
       >
-        <Inbox size={16} aria-hidden /> Attention
+        <PackageOpen size={16} aria-hidden /> Plugins
         {attention > 0 && (
           <span
             className="badge badge--attn"
@@ -455,20 +452,43 @@ export default function Sidebar() {
         <Clock size={16} aria-hidden /> Automations
       </button>
 
-      <div className="sidebar__section">
-        <span>Projects</span>
-        <button
-          type="button"
-          className="sidebar__add"
-          onClick={() => void addProjectFlow()}
-          aria-label="add project"
-          title="Add a project"
-        >
-          <Plus size={13} aria-hidden />
-        </button>
-      </div>
-
       <div className="sidebar__scroll">
+        {pinnedIds.length > 0 && (
+          <div className="sidebar__pinned">
+            <div className="sidebar__section">
+              <span>Pinned</span>
+            </div>
+            <ul>
+              {pinnedIds.map((id) => (
+                <SidebarItem
+                  key={id}
+                  sessionId={id}
+                  now={now}
+                  renaming={renamingId === id}
+                  onCommitRename={(name) => commitRename(id, name)}
+                  onCancelRename={() => setRenamingId(null)}
+                  onContext={(sid, x, y, trigger) =>
+                    setMenu({ sessionId: sid, x, y, trigger })
+                  }
+                />
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="sidebar__section">
+          <span>Projects</span>
+          <button
+            type="button"
+            className="sidebar__add"
+            onClick={() => void addProjectFlow()}
+            aria-label="add project"
+            title="Add a project"
+          >
+            <Plus size={13} aria-hidden />
+          </button>
+        </div>
+
         {groups.length === 0 && (
           <p className="muted sidebar__empty">
             No projects yet. Add one to get started.
@@ -503,9 +523,28 @@ export default function Sidebar() {
         ))}
       </div>
 
-      <ActivityFooter />
-
       <div className="sidebar__corner">
+        <button
+          type="button"
+          className={`sidebar__settings-link${panel === "inbox" ? " sidebar__settings-link--active" : ""}`}
+          onClick={() => openInbox()}
+          aria-label="attention inbox"
+          aria-current={panel === "inbox" ? "page" : undefined}
+        >
+          <Inbox size={16} aria-hidden /> Attention
+          {attention > 0 && (
+            <span className="badge badge--attn">{attention}</span>
+          )}
+        </button>
+        <button
+          type="button"
+          className={`sidebar__settings-link${panel === "fleet" ? " sidebar__settings-link--active" : ""}`}
+          onClick={() => openFleet()}
+          aria-label="fleet overview"
+          aria-current={panel === "fleet" ? "page" : undefined}
+        >
+          <LayoutGrid size={16} aria-hidden /> Fleet
+        </button>
         <button
           type="button"
           className={`sidebar__corner-btn${panel === "eventlog" ? " sidebar__corner-btn--active" : ""}`}
@@ -703,119 +742,6 @@ function SessionContextMenu({
           </button>
         </li>
       </ul>
-    </div>
-  );
-}
-
-/** Live fleet activity summary: how many sessions are working/queued/idle. */
-function ActivityFooter() {
-  const heartbeat = useFleet((state) => state.heartbeat);
-  const [intervalSecs, setIntervalSecs] = useState(10);
-  const [seconds, setSeconds] = useState(10);
-  const [nextDispatch, setNextDispatch] = useState<{
-    sessionId: string;
-    task: string;
-  } | null>(null);
-  const activity = useFleet(
-    useShallow((s) => {
-      let working = 0;
-      let idle = 0;
-      let stopped = 0;
-      let attention = 0;
-      let queued = 0;
-      for (const x of Object.values(s.sessions)) {
-        queued += x.queued;
-        if (x.state.status === "working") working += 1;
-        else if (
-          x.state.status === "needsApproval" ||
-          x.state.status === "error"
-        )
-          attention += 1;
-        else if (x.state.status === "disconnected") stopped += 1;
-        else idle += 1;
-      }
-      return {
-        total: s.order.length,
-        working,
-        idle,
-        stopped,
-        attention,
-        queued,
-      };
-    }),
-  );
-
-  async function refreshPreview() {
-    try {
-      const report = await orchPreview();
-      setNextDispatch(report.dispatched[0] ?? null);
-    } catch {
-      setNextDispatch(null);
-    }
-  }
-
-  useEffect(() => {
-    void orchHeartbeatSecs()
-      .then((value) => {
-        setIntervalSecs(value);
-        setSeconds(value);
-      })
-      .catch(() => {});
-    void refreshPreview();
-  }, []);
-
-  useEffect(() => {
-    const timer = setInterval(
-      () => setSeconds((current) => Math.max(0, current - 1)),
-      1000,
-    );
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    if (seconds !== 0) return;
-    setSeconds(intervalSecs);
-    void refreshPreview();
-  }, [intervalSecs, seconds]);
-
-  useEffect(() => {
-    if (!heartbeat) return;
-    setSeconds(intervalSecs);
-    void refreshPreview();
-  }, [heartbeat, intervalSecs]);
-
-  return (
-    <div className="sidebar__footer" aria-label="fleet activity">
-      <h3 className="sidebar__section">
-        <Activity size={13} aria-hidden /> Activity
-      </h3>
-      {activity.total === 0 ? (
-        <p className="muted">No sessions yet.</p>
-      ) : (
-        <p className="muted">
-          {activity.working} working · {activity.queued} queued ·{" "}
-          {activity.idle} idle
-          {activity.stopped > 0 && <> · {activity.stopped} stopped</>}
-          {activity.attention > 0 && (
-            <> · {activity.attention} need attention</>
-          )}
-        </p>
-      )}
-      {activity.total > 0 && (
-        <button
-          type="button"
-          className="sidebar__heartbeat"
-          onClick={() => void refreshPreview()}
-          title="Refresh the dry-run heartbeat decision"
-        >
-          <Clock size={11} aria-hidden /> {seconds}s ·{" "}
-          {nextDispatch
-            ? `Next: ${nextDispatch.task}`
-            : activity.queued > 0
-              ? "Queued work is waiting for capacity"
-              : "No queued dispatch"}
-        </button>
-      )}
     </div>
   );
 }
