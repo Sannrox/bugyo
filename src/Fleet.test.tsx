@@ -103,6 +103,7 @@ vi.mock("./lib/ipc", () => ({
   onOrchQueue: vi.fn(async () => () => {}),
   onOrchHeartbeat: vi.fn(async () => () => {}),
   onAutomationRun: vi.fn(async () => () => {}),
+  onTriggerRun: vi.fn(async () => () => {}),
 }));
 
 import Fleet from "./Fleet";

@@ -20,6 +20,7 @@ import {
   SplitSquareHorizontal,
   SquareTerminal,
   Trash2,
+  Zap,
 } from "lucide-react";
 import {
   acpDeleteSession,
@@ -228,6 +229,7 @@ export default function Sidebar() {
   const setActive = useFleet((s) => s.setActive);
   const openInbox = useFleet((s) => s.openInbox);
   const openAutomations = useFleet((s) => s.openAutomations);
+  const openTriggers = useFleet((s) => s.openTriggers);
   const openSettings = useFleet((s) => s.openSettings);
   const openEventLog = useFleet((s) => s.openEventLog);
   const openFleet = useFleet((s) => s.openFleet);
@@ -450,6 +452,16 @@ export default function Sidebar() {
         aria-current={panel === "automations" ? "page" : undefined}
       >
         <Clock size={16} aria-hidden /> Automations
+      </button>
+
+      <button
+        type="button"
+        className={`sidebar__new${panel === "triggers" ? " sidebar__new--active" : ""}`}
+        onClick={() => openTriggers()}
+        aria-label="triggers"
+        aria-current={panel === "triggers" ? "page" : undefined}
+      >
+        <Zap size={16} aria-hidden /> Triggers
       </button>
 
       <div className="sidebar__scroll">

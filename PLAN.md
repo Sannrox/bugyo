@@ -73,3 +73,19 @@ against `kiro-cli 2.12.0`, responsive visual QA, and production app/DMG/updater
 bundle generation. Distribution notarization and updater signing remain release
 operations: they require the Apple credentials and `TAURI_SIGNING_PRIVATE_KEY`
 that are deliberately not stored in the repository.
+
+## Phase 6 — Tauri-native Chisei harness (planned)
+
+Add a runtime-neutral native agent loop inside Bugyo's Tauri backend, using
+Chisei's OpenAI-compatible gateway while preserving Kiro ACP as an independent
+runtime. Bugyo owns sessions, tools, approvals, worktrees, recovery, review, and
+landing; Chisei owns governed model execution, operation correlation, and the
+external evidence contract.
+
+The implementation phases, security boundaries, persistence requirements, and
+verification gates are defined in
+[`docs/native-harness-plan.md`](./docs/native-harness-plan.md).
+
+Exit criterion: a Chisei-native task can stream, use approval-bound local tools,
+survive interruption, produce a reviewable checked change, and emit correlated
+outcome evidence without regressing existing Kiro sessions.

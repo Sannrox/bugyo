@@ -43,6 +43,12 @@ tauri-plugin-dialog = "2"
 saffron = "0.1.0"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Read-only HTTP GET detector for triggers. rustls (no system OpenSSL); already
+# resolved in-tree via tauri-plugin-updater, so this adds no new dependency
+# weight. Only GET + text is used (no `json` feature — parsing is our own).
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+] }
 
 # macOS-only: resolve Bugyo's own NSWindow number (`-[NSWindow windowNumber]`)
 # for window-scoped screenshots. Version pinned to match Tauri's own objc2.

@@ -36,7 +36,8 @@ pub fn run() {
             // Load persisted sessions (cold) so the fleet survives restarts.
             tauri::async_runtime::block_on(manager.hydrate());
             service::spawn_heartbeat(manager.clone());
-            service::spawn_automation_scheduler(manager);
+            service::spawn_automation_scheduler(manager.clone());
+            service::spawn_trigger_scheduler(manager);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -83,6 +84,11 @@ pub fn run() {
             service::automation_update,
             service::automation_remove,
             service::automation_run_now,
+            service::trigger_list,
+            service::trigger_create,
+            service::trigger_update,
+            service::trigger_remove,
+            service::trigger_run_now,
         ])
         // SAFETY: failing to start the app is unrecoverable; crash loudly.
         .run(tauri::generate_context!())

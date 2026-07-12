@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use serde::Serialize;
 
 pub mod schedule;
+pub mod triggers;
 
 /// A session is dispatchable now iff it is idle and has queued work.
 pub fn dispatchable(busy: bool, queue_len: usize) -> bool {

@@ -303,3 +303,69 @@ export interface AutomationRun {
   status: string;
   message: string | null;
 }
+
+// ---- Triggers -------------------------------------------------------------
+
+/** Mirrors `config::OutputFormat` — how a detector's output is parsed. */
+export type OutputFormat = "json" | "lines";
+
+/** Mirrors `config::HttpHeader`. `value` may contain `${ENV_VAR}` placeholders
+ * resolved at detection time (so tokens are referenced, never persisted). */
+export interface HttpHeader {
+  name: string;
+  value: string;
+}
+
+/** Mirrors `config::TriggerSource` — where a trigger gets its items. */
+export type TriggerSource =
+  | { type: "command"; program: string; args: string[] }
+  | { type: "httpGet"; url: string; headers: HttpHeader[] };
+
+/** Mirrors `config::TriggerAction` — what a trigger does on new items. */
+export type TriggerAction =
+  | { type: "automation"; automationId: string }
+  | {
+      type: "inline";
+      prompt: string;
+      target: AutomationTarget;
+      trust: TrustMode;
+    };
+
+/** Mirrors `config::FanoutMode` — how multiple matches in one poll are handled. */
+export type FanoutMode = "fanOut" | "batch";
+
+/** Mirrors `config::DedupState` — internal, backend-owned dedup state. */
+export interface DedupState {
+  watermark: string | null;
+  seen: string[];
+}
+
+/** Mirrors `config::Trigger` — an event-driven poller. */
+export interface Trigger {
+  id: string;
+  name: string;
+  enabled: boolean;
+  source: TriggerSource;
+  outputFormat: OutputFormat;
+  schedule: Schedule;
+  action: TriggerAction;
+  mode: FanoutMode;
+  maxRunsPerTick: number;
+  dedup: DedupState;
+  lastRun: string | null;
+  created: string;
+}
+
+/**
+ * Mirrors `config::TriggerRun` — a recorded run, also the payload of the
+ * `trigger:run` Tauri event. `status` is one of `dispatched` | `created` |
+ * `skipped` | `error`; `matched` is how many new items the run fired on.
+ */
+export interface TriggerRun {
+  ts: string;
+  triggerId: string;
+  sessionId: string | null;
+  status: string;
+  matched: number;
+  message: string | null;
+}
