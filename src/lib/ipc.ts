@@ -28,6 +28,8 @@ import type {
   SearchHit,
   SessionInfo,
   SessionMeta,
+  Trigger,
+  TriggerRun,
   TrustProfile,
   WorkspaceCreateArgs,
   WorkspaceReviewState,
@@ -43,6 +45,8 @@ export const QUEUE_EVENT = "orch:queue";
 export const HEARTBEAT_EVENT = "orch:heartbeat";
 /** Automation run reports (matches `service::AUTOMATION_EVENT`). */
 export const AUTOMATION_EVENT = "automation:run";
+/** Trigger run reports (matches `service::TRIGGER_EVENT`). */
+export const TRIGGER_EVENT = "trigger:run";
 
 /** Bridge smoke test: greet by name, returns the backend version. */
 export function ping(name: string): Promise<PingResponse> {
@@ -383,6 +387,40 @@ export function onAutomationRun(
   handler: (run: AutomationRun) => void,
 ): Promise<UnlistenFn> {
   return listen<AutomationRun>(AUTOMATION_EVENT, (e) => handler(e.payload));
+}
+
+/** List all persisted triggers. */
+export function triggerList(): Promise<Trigger[]> {
+  return invoke<Trigger[]>("trigger_list");
+}
+
+/** Create a trigger; the backend assigns id/created, validates it, and resets
+ * internal dedup state. */
+export function triggerCreate(trigger: Trigger): Promise<Trigger> {
+  return invoke<Trigger>("trigger_create", { trigger });
+}
+
+/** Update an existing trigger (upsert by id); dedup state is preserved. */
+export function triggerUpdate(trigger: Trigger): Promise<Trigger> {
+  return invoke<Trigger>("trigger_update", { trigger });
+}
+
+/** Remove a trigger by id. */
+export function triggerRemove(id: string): Promise<void> {
+  return invoke<void>("trigger_remove", { id });
+}
+
+/** Run a trigger now (a manual test: polls + fires new items without advancing
+ * its dedup state, so it's safe to run repeatedly while configuring). */
+export function triggerRunNow(id: string): Promise<TriggerRun> {
+  return invoke<TriggerRun>("trigger_run_now", { id });
+}
+
+/** Subscribe to trigger run reports. */
+export function onTriggerRun(
+  handler: (run: TriggerRun) => void,
+): Promise<UnlistenFn> {
+  return listen<TriggerRun>(TRIGGER_EVENT, (e) => handler(e.payload));
 }
 
 /**

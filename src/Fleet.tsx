@@ -5,6 +5,7 @@ import {
   acpListSessions,
   onAcpEvent,
   onAutomationRun,
+  onTriggerRun,
   onOrchHeartbeat,
   onOrchQueue,
   notify,
@@ -24,6 +25,7 @@ import SessionPane from "./SessionPane";
 import NewSessionForm from "./NewSessionForm";
 import Inbox from "./Inbox";
 import Automations from "./Automations";
+import Triggers from "./Triggers";
 import Settings from "./Settings";
 import FleetGrid from "./FleetGrid";
 import CommandPalette from "./CommandPalette";
@@ -205,6 +207,19 @@ export default function Fleet() {
         );
       }),
     );
+    void track(
+      "trigger runs",
+      onTriggerRun((run) => {
+        // Skipped runs (a poll that found nothing new) are noise — stay quiet.
+        if (run.status === "skipped") return;
+        void notify(
+          run.status === "error" ? "Trigger failed" : "Trigger fired",
+          run.status === "error"
+            ? (run.message ?? "unknown error")
+            : `${run.matched} item(s)${run.sessionId ? ` · ${run.sessionId.slice(0, 8)}` : ""}`,
+        );
+      }),
+    );
 
     return () => {
       active = false;
@@ -307,6 +322,8 @@ export default function Fleet() {
           <Inbox />
         ) : panel === "automations" ? (
           <Automations />
+        ) : panel === "triggers" ? (
+          <Triggers />
         ) : panel === "settings" ? (
           <Settings />
         ) : panel === "plugins" ? (

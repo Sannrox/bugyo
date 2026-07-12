@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 use crate::acp::client::AcpClient;
 use crate::acp::{AcpError, AcpEvent, EventSink};
 use crate::config;
-use crate::orchestrator::{Dispatched, HeartbeatReport};
+use crate::orchestrator::{triggers, Dispatched, HeartbeatReport};
 use crate::state::{self, WorkerMeta};
 use crate::workspace::{self, Workspace};
 
@@ -33,6 +33,8 @@ pub const QUEUE_EVENT: &str = "orch:queue";
 pub const HEARTBEAT_EVENT: &str = "orch:heartbeat";
 /// Automation run reports (fired when an automation is triggered).
 pub const AUTOMATION_EVENT: &str = "automation:run";
+/// Trigger run reports (fired when a trigger detects new items and acts).
+pub const TRIGGER_EVENT: &str = "trigger:run";
 /// Budget-exceeded reports (fired when dispatch is paused for a capped session).
 pub const BUDGET_EVENT: &str = "budget:exceeded";
 /// Heartbeat pass interval (seconds).
@@ -41,6 +43,11 @@ pub const HEARTBEAT_SECS: u64 = 10;
 /// Automation scheduler pass interval (seconds). Governs the finest cadence at
 /// which due automations are noticed (interval/cron are still honoured).
 pub const AUTOMATION_SECS: u64 = 30;
+
+/// Trigger scheduler pass interval (seconds). Governs the finest cadence at
+/// which due triggers are polled (each trigger's own schedule is still
+/// honoured). Detection is token-free, so this can be brisk.
+pub const TRIGGER_SECS: u64 = 30;
 
 struct TauriEventSink {
     app: AppHandle,
@@ -529,6 +536,86 @@ impl AcpManager {
         runs
     }
 
+    /// One trigger scheduler pass: for each enabled, due trigger, poll its
+    /// (token-free) detector, dedup against persisted state, cap the fire count,
+    /// fire the action for genuinely-new items, then persist the advanced dedup
+    /// state and `last_run`. Detector or action errors are recorded as error
+    /// runs and back off (state is **not** advanced, so they retry next pass). Fresh
+    /// (never-polled) triggers that are not yet due are seeded, exactly like
+    /// automations, so a restart doesn't re-fire them.
+    pub async fn trigger_tick(&self) -> Vec<config::TriggerRun> {
+        let home = config::config_home();
+        let triggers_cfg = config::list_triggers(&home).unwrap_or_default();
+        let now = chrono::Local::now().fixed_offset();
+        let due: std::collections::HashSet<String> = triggers::due_trigger_ids(&triggers_cfg, now)
+            .into_iter()
+            .collect();
+
+        let mut runs = Vec::new();
+        for trigger in &triggers_cfg {
+            if !trigger.enabled {
+                continue;
+            }
+            if due.contains(&trigger.id) {
+                let run = self.poll_and_fire(trigger, &home, true).await;
+                runs.push(run);
+            } else if trigger.last_run.is_none() {
+                // Seed a fresh trigger's `last_run` so its schedule measures
+                // from now (matches the automation seeding semantics).
+                let mut updated = trigger.clone();
+                updated.last_run = Some(state::now_ts());
+                let _ = config::save_trigger(&home, &updated);
+            }
+        }
+        runs
+    }
+
+    /// Poll a trigger's detector once and, for genuinely-new items, fire its
+    /// action. When `advance` is true (scheduler pass), persist the advanced
+    /// dedup state and `last_run`; when false ("run now"), fire without
+    /// consuming items so it stays a safe, repeatable test. A detector error
+    /// records an error run and never advances state.
+    async fn poll_and_fire(
+        &self,
+        trigger: &config::Trigger,
+        home: &std::path::Path,
+        advance: bool,
+    ) -> config::TriggerRun {
+        let detected = match detect(&trigger.source, trigger.output_format).await {
+            Ok(items) => items,
+            Err(e) => {
+                let run = config::TriggerRun {
+                    ts: state::now_ts(),
+                    trigger_id: trigger.id.clone(),
+                    session_id: None,
+                    status: "error".to_string(),
+                    matched: 0,
+                    message: Some(e.to_string()),
+                };
+                self.log(&format!("trigger \"{}\" -> error", trigger.name))
+                    .await;
+                self.emit(TRIGGER_EVENT, run.clone());
+                return run;
+            }
+        };
+
+        let fresh = triggers::new_items(&detected, &trigger.dedup);
+        let fired = triggers::clamp_runs(fresh.clone(), trigger.max_runs_per_tick);
+        let run = self.run_trigger_action(trigger, &fired).await;
+
+        // Only consume matched items after the action was accepted by the
+        // dispatch path. Otherwise a transient target/session failure would
+        // mark the item seen and silently prevent a later retry.
+        if advance && run.status != "error" {
+            let mut updated = trigger.clone();
+            updated.dedup =
+                triggers::advance_state(&trigger.dedup, &fresh, &fired, triggers::SEEN_CAP);
+            updated.last_run = Some(state::now_ts());
+            let _ = config::save_trigger(home, &updated);
+        }
+        run
+    }
+
     /// Route an automation to its action. Returns `(session_id, status)` where
     /// status is `"dispatched"` (existing) or `"created"` (new).
     async fn run_automation_inner(
@@ -622,6 +709,108 @@ impl AcpManager {
                 Ok((Some(id), "created"))
             }
         }
+    }
+
+    /// Fire a trigger's action for its newly-detected `items`, then record +
+    /// emit a [`TriggerRun`]. Does **not** advance dedup state — the caller
+    /// (scheduler tick) owns persistence, so a manual "run now" can be a safe
+    /// test that doesn't consume items (mirrors automation "run now").
+    pub async fn run_trigger_action(
+        &self,
+        trigger: &config::Trigger,
+        items: &[triggers::DetectedItem],
+    ) -> config::TriggerRun {
+        let run = match self.run_trigger_action_inner(trigger, items).await {
+            Ok((session_id, status)) => config::TriggerRun {
+                ts: state::now_ts(),
+                trigger_id: trigger.id.clone(),
+                session_id,
+                status: status.to_string(),
+                matched: items.len(),
+                message: None,
+            },
+            Err(e) => config::TriggerRun {
+                ts: state::now_ts(),
+                trigger_id: trigger.id.clone(),
+                session_id: None,
+                status: "error".to_string(),
+                matched: items.len(),
+                message: Some(e),
+            },
+        };
+        self.log(&format!(
+            "trigger \"{}\" -> {} ({} item(s))",
+            trigger.name, run.status, run.matched
+        ))
+        .await;
+        self.emit(TRIGGER_EVENT, run.clone());
+        run
+    }
+
+    /// Route a trigger's action to the shared automation dispatch path. The
+    /// inline action synthesizes an automation (keyed `trigger:<id>` so
+    /// `New*` targets reuse one session across items/ticks); the automation
+    /// action loads the referenced automation. Matched items are rendered as
+    /// untrusted context and injected into the prompt — per item in `FanOut`
+    /// mode, or as one batch in `Batch` mode.
+    async fn run_trigger_action_inner(
+        &self,
+        trigger: &config::Trigger,
+        items: &[triggers::DetectedItem],
+    ) -> Result<(Option<String>, &'static str), String> {
+        if items.is_empty() {
+            return Ok((None, "skipped"));
+        }
+        let (base, base_prompt) = match &trigger.action {
+            config::TriggerAction::Inline {
+                prompt,
+                target,
+                trust,
+            } => {
+                let base = config::Automation {
+                    id: format!("trigger:{}", trigger.id),
+                    name: trigger.name.clone(),
+                    enabled: true,
+                    prompt: prompt.clone(),
+                    schedule: trigger.schedule.clone(),
+                    target: target.clone(),
+                    trust: trust.clone(),
+                    last_run: None,
+                    created: String::new(),
+                };
+                (base, prompt.clone())
+            }
+            config::TriggerAction::Automation { automation_id } => {
+                let automation = config::list_automations(&config::config_home())
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|a| &a.id == automation_id)
+                    .ok_or_else(|| format!("no automation: {automation_id}"))?;
+                let base_prompt = automation.prompt.clone();
+                (automation, base_prompt)
+            }
+        };
+
+        // Batch → one run with all items; FanOut → one run per item. Each run
+        // reuses the shared automation dispatch (respecting the trust mode).
+        let batches: Vec<Vec<triggers::DetectedItem>> = match trigger.mode {
+            config::FanoutMode::Batch => vec![items.to_vec()],
+            config::FanoutMode::FanOut => items.iter().map(|item| vec![item.clone()]).collect(),
+        };
+
+        let mut last_session = None;
+        let mut status = "dispatched";
+        for batch in &batches {
+            let context = triggers::render_context(batch);
+            let mut automation = base.clone();
+            automation.prompt = format!("{base_prompt}\n\n{context}");
+            let (session_id, sub_status) = self.run_automation_inner(&automation).await?;
+            last_session = session_id.or(last_session);
+            if sub_status == "created" {
+                status = "created";
+            }
+        }
+        Ok((last_session, status))
     }
 
     /// Capture a screenshot and send it to a session as an image-annotated
@@ -1239,6 +1428,92 @@ async fn start_client(
     Ok((Arc::new(client), id))
 }
 
+/// Run a trigger's detector and parse its output into deduplicable items.
+///
+/// **Token-free by contract:** this never invokes the model. The detector is a
+/// read-only command/script or an HTTP GET; its output is parsed as data and is
+/// treated as untrusted downstream (see [`crate::orchestrator::triggers`]).
+pub async fn detect(
+    source: &config::TriggerSource,
+    format: config::OutputFormat,
+) -> Result<Vec<triggers::DetectedItem>, triggers::TriggerError> {
+    let raw = match source {
+        config::TriggerSource::Command { program, args } => {
+            run_detector_command(program, args).await?
+        }
+        config::TriggerSource::HttpGet { url, headers } => http_get(url, headers).await?,
+    };
+    Ok(triggers::parse_items(&raw, format)?)
+}
+
+/// Spawn a read-only detector command with explicit args (never a shell string)
+/// off the async executor, returning its stdout. A non-zero exit is an error.
+async fn run_detector_command(
+    program: &str,
+    args: &[String],
+) -> Result<String, triggers::TriggerError> {
+    let program = program.to_string();
+    let args = args.to_vec();
+    let label = program.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&program).args(&args).output()
+    })
+    .await
+    .map_err(|e| triggers::TriggerError::Detector(format!("spawn task failed: {e}")))?
+    .map_err(|e| triggers::TriggerError::Detector(format!("could not run \"{label}\": {e}")))?;
+
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(triggers::TriggerError::Detector(format!(
+            "detector exited {code}: {}",
+            stderr.trim().chars().take(300).collect::<String>()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Issue a read-only HTTP GET and return the response body. Header values may
+/// reference env vars via `${VAR}`, resolved here (never persisted).
+async fn http_get(
+    url: &str,
+    headers: &[config::HttpHeader],
+) -> Result<String, triggers::TriggerError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(concat!("bugyo/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| triggers::TriggerError::Detector(e.to_string()))?;
+
+    let mut request = client.get(url);
+    for header in headers {
+        let value = triggers::resolve_placeholders(&header.value, |k| std::env::var(k).ok());
+        request = request.header(header.name.as_str(), value);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| triggers::TriggerError::Detector(e.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| triggers::TriggerError::Detector(e.to_string()))?;
+    if !status.is_success() {
+        return Err(triggers::TriggerError::Detector(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            body.trim().chars().take(300).collect::<String>()
+        )));
+    }
+    Ok(body)
+}
+
 /// Start a session rooted at `cwd` (defaults to the backend cwd), not bound to
 /// a workspace. Returns the new session id.
 #[tauri::command]
@@ -1605,6 +1880,80 @@ pub async fn automation_run_now(
         .find(|a| a.id == id)
         .ok_or_else(|| format!("no automation: {id}"))?;
     Ok(manager.run_automation(&automation).await)
+}
+
+/// List all persisted triggers.
+#[tauri::command]
+pub fn trigger_list() -> Result<Vec<config::Trigger>, String> {
+    config::list_triggers(&config::config_home()).map_err(|e| e.to_string())
+}
+
+/// Create a trigger. The backend assigns the id + created timestamp, validates
+/// the poll schedule, and resets internal dedup state / `last_run`. Returns the
+/// stored record.
+#[tauri::command]
+pub fn trigger_create(mut trigger: config::Trigger) -> Result<config::Trigger, String> {
+    crate::orchestrator::schedule::validate(&trigger.schedule).map_err(|e| e.to_string())?;
+    if trigger.id.trim().is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        trigger.id = format!("trig-{nanos}");
+    }
+    if trigger.created.trim().is_empty() {
+        trigger.created = state::now_ts();
+    }
+    // Dedup state and last_run are backend-owned; a new trigger starts clean.
+    trigger.dedup = config::DedupState::default();
+    trigger.last_run = None;
+    config::save_trigger(&config::config_home(), &trigger).map_err(|e| e.to_string())?;
+    Ok(trigger)
+}
+
+/// Update an existing trigger (upsert by id). Validates the poll schedule and
+/// preserves the backend-owned dedup state (never overwritten from the UI).
+#[tauri::command]
+pub fn trigger_update(trigger: config::Trigger) -> Result<config::Trigger, String> {
+    crate::orchestrator::schedule::validate(&trigger.schedule).map_err(|e| e.to_string())?;
+    let home = config::config_home();
+    // Preserve internal dedup state + last_run across edits so re-saving a
+    // trigger from the UI can't cause it to re-fire on already-seen items.
+    let mut trigger = trigger;
+    if let Some(existing) = config::list_triggers(&home)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|t| t.id == trigger.id)
+    {
+        trigger.dedup = existing.dedup;
+        trigger.last_run = existing.last_run;
+    }
+    config::save_trigger(&home, &trigger).map_err(|e| e.to_string())?;
+    Ok(trigger)
+}
+
+/// Remove a trigger by id.
+#[tauri::command]
+pub fn trigger_remove(id: String) -> Result<(), String> {
+    config::remove_trigger(&config::config_home(), &id).map_err(|e| e.to_string())
+}
+
+/// Run a trigger now (a manual "test"): poll the detector and fire on its
+/// new items, but do **not** advance dedup state or `last_run` — so it can be
+/// run repeatedly while configuring, and doesn't consume items the scheduler
+/// should later handle.
+#[tauri::command]
+pub async fn trigger_run_now(
+    manager: State<'_, AcpManager>,
+    id: String,
+) -> Result<config::TriggerRun, String> {
+    let home = config::config_home();
+    let trigger = config::list_triggers(&home)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| format!("no trigger: {id}"))?;
+    Ok(manager.poll_and_fire(&trigger, &home, false).await)
 }
 
 /// Request cancellation of `session_id`'s current turn.
@@ -2036,6 +2385,20 @@ pub fn spawn_automation_scheduler(manager: AcpManager) {
         loop {
             tokio::time::sleep(interval).await;
             let _ = manager.automation_tick().await;
+        }
+    });
+}
+
+/// Spawn the trigger scheduler: a periodic pass that polls every enabled,
+/// due trigger's (token-free) detector and fires its action for new items
+/// (see [`AcpManager::trigger_tick`]). Each run emits a [`TRIGGER_EVENT`];
+/// dedup state + `last_run` are persisted per pass.
+pub fn spawn_trigger_scheduler(manager: AcpManager) {
+    tauri::async_runtime::spawn(async move {
+        let interval = Duration::from_secs(TRIGGER_SECS);
+        loop {
+            tokio::time::sleep(interval).await;
+            let _ = manager.trigger_tick().await;
         }
     });
 }
@@ -2625,6 +2988,351 @@ mod tests {
     // See note above: the env lock is intentionally held across awaits.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
+    async fn trigger_inline_fanout_enqueues_prompt_with_context_per_item() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        mgr.insert_cold_busy_for_test("sess-1", "sess-1").await;
+
+        let trigger = config::Trigger {
+            id: "t1".into(),
+            name: "watch PRs".into(),
+            enabled: true,
+            source: config::TriggerSource::Command {
+                program: "true".into(),
+                args: vec![],
+            },
+            output_format: config::OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 60 },
+            action: config::TriggerAction::Inline {
+                prompt: "Review this PR.".into(),
+                target: AutomationTarget::ExistingSession {
+                    session_id: "sess-1".into(),
+                },
+                trust: TrustMode::Ask,
+            },
+            mode: config::FanoutMode::FanOut,
+            max_runs_per_tick: 5,
+            dedup: config::DedupState::default(),
+            last_run: None,
+            created: state::now_ts(),
+        };
+
+        let items = vec![
+            triggers::DetectedItem {
+                id: "1".into(),
+                cursor: None,
+                fields: Default::default(),
+            },
+            triggers::DetectedItem {
+                id: "2".into(),
+                cursor: None,
+                fields: Default::default(),
+            },
+        ];
+
+        let run = mgr.run_trigger_action(&trigger, &items).await;
+        assert_eq!(run.status, "dispatched");
+        assert_eq!(run.trigger_id, "t1");
+        assert_eq!(run.matched, 2);
+
+        // Fan-out: one queued prompt per item, each carrying the base prompt +
+        // that item's delimited untrusted context.
+        let queued = state::read_queue(&tmp.0, "sess-1").unwrap();
+        assert_eq!(queued.len(), 2);
+        assert!(queued[0].starts_with("Review this PR."));
+        assert!(queued[0].contains("<untrusted-trigger-context>"));
+        assert!(queued[0].contains("id=1"));
+        assert!(queued[1].contains("id=2"));
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    // See note above: the env lock is intentionally held across awaits.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn trigger_batch_enqueues_single_prompt_with_all_items() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        mgr.insert_cold_busy_for_test("sess-1", "sess-1").await;
+
+        let trigger = config::Trigger {
+            id: "t2".into(),
+            name: "batch watch".into(),
+            enabled: true,
+            source: config::TriggerSource::Command {
+                program: "true".into(),
+                args: vec![],
+            },
+            output_format: config::OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 60 },
+            action: config::TriggerAction::Inline {
+                prompt: "Triage these.".into(),
+                target: AutomationTarget::ExistingSession {
+                    session_id: "sess-1".into(),
+                },
+                trust: TrustMode::Ask,
+            },
+            mode: config::FanoutMode::Batch,
+            max_runs_per_tick: 5,
+            dedup: config::DedupState::default(),
+            last_run: None,
+            created: state::now_ts(),
+        };
+        let items = vec![
+            triggers::DetectedItem {
+                id: "1".into(),
+                cursor: None,
+                fields: Default::default(),
+            },
+            triggers::DetectedItem {
+                id: "2".into(),
+                cursor: None,
+                fields: Default::default(),
+            },
+        ];
+
+        let run = mgr.run_trigger_action(&trigger, &items).await;
+        assert_eq!(run.status, "dispatched");
+
+        // Batch: a single queued prompt carrying both items.
+        let queued = state::read_queue(&tmp.0, "sess-1").unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].contains("id=1"));
+        assert!(queued[0].contains("id=2"));
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn trigger_with_no_items_is_skipped() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        let trigger = config::Trigger {
+            id: "t3".into(),
+            name: "idle".into(),
+            enabled: true,
+            source: config::TriggerSource::Command {
+                program: "true".into(),
+                args: vec![],
+            },
+            output_format: config::OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 60 },
+            action: config::TriggerAction::Automation {
+                automation_id: "does-not-matter".into(),
+            },
+            mode: config::FanoutMode::FanOut,
+            max_runs_per_tick: 5,
+            dedup: config::DedupState::default(),
+            last_run: None,
+            created: state::now_ts(),
+        };
+        let run = mgr.run_trigger_action(&trigger, &[]).await;
+        assert_eq!(run.status, "skipped");
+        assert_eq!(run.matched, 0);
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn trigger_tick_fires_new_items_then_dedups_and_advances() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        mgr.insert_cold_busy_for_test("sess-1", "sess-1").await;
+
+        // A due trigger (last_run in the past) whose detector emits one item.
+        let trigger = config::Trigger {
+            id: "t1".into(),
+            name: "watch".into(),
+            enabled: true,
+            source: config::TriggerSource::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), r#"printf '[{"id":"pr-1"}]'"#.into()],
+            },
+            output_format: config::OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 1 },
+            action: config::TriggerAction::Inline {
+                prompt: "Review.".into(),
+                target: AutomationTarget::ExistingSession {
+                    session_id: "sess-1".into(),
+                },
+                trust: TrustMode::Ask,
+            },
+            mode: config::FanoutMode::FanOut,
+            max_runs_per_tick: 5,
+            dedup: config::DedupState::default(),
+            last_run: Some("2020-01-01T00:00:00+0000".into()),
+            created: state::now_ts(),
+        };
+        config::save_trigger(&tmp.0, &trigger).unwrap();
+
+        // First tick fires on the new item and records it in dedup state.
+        let runs = mgr.trigger_tick().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "dispatched");
+        assert_eq!(runs[0].matched, 1);
+        let stored = config::list_triggers(&tmp.0).unwrap();
+        assert!(stored[0].dedup.seen.contains(&"pr-1".to_string()));
+        assert_eq!(state::read_queue(&tmp.0, "sess-1").unwrap().len(), 1);
+
+        // Second tick: same item is already seen → skipped, no new enqueue.
+        // (Reset last_run so it is due again.)
+        let mut again = stored[0].clone();
+        again.last_run = Some("2020-01-01T00:00:00+0000".into());
+        config::save_trigger(&tmp.0, &again).unwrap();
+        let runs2 = mgr.trigger_tick().await;
+        assert_eq!(runs2.len(), 1);
+        assert_eq!(runs2[0].status, "skipped");
+        assert_eq!(state::read_queue(&tmp.0, "sess-1").unwrap().len(), 1);
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn trigger_tick_records_detector_error_without_advancing() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        let trigger = config::Trigger {
+            id: "t-err".into(),
+            name: "broken".into(),
+            enabled: true,
+            source: config::TriggerSource::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+            },
+            output_format: config::OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 1 },
+            action: config::TriggerAction::Automation {
+                automation_id: "a1".into(),
+            },
+            mode: config::FanoutMode::FanOut,
+            max_runs_per_tick: 5,
+            dedup: config::DedupState::default(),
+            last_run: Some("2020-01-01T00:00:00+0000".into()),
+            created: state::now_ts(),
+        };
+        config::save_trigger(&tmp.0, &trigger).unwrap();
+
+        let runs = mgr.trigger_tick().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "error");
+        // State is NOT advanced on error: dedup stays empty and last_run is
+        // unchanged, so the trigger retries on the next pass.
+        let stored = config::list_triggers(&tmp.0).unwrap();
+        assert!(stored[0].dedup.seen.is_empty());
+        assert_eq!(
+            stored[0].last_run.as_deref(),
+            Some("2020-01-01T00:00:00+0000")
+        );
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn trigger_tick_records_action_error_without_advancing() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        let mgr = AcpManager::default();
+        let trigger = config::Trigger {
+            id: "t-action-err".into(),
+            name: "missing target".into(),
+            enabled: true,
+            source: config::TriggerSource::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), r#"printf '[{"id":"pr-1"}]'"#.into()],
+            },
+            output_format: config::OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 1 },
+            action: config::TriggerAction::Inline {
+                prompt: "Review.".into(),
+                target: AutomationTarget::ExistingSession {
+                    session_id: "missing-session".into(),
+                },
+                trust: TrustMode::Ask,
+            },
+            mode: config::FanoutMode::FanOut,
+            max_runs_per_tick: 5,
+            dedup: config::DedupState::default(),
+            last_run: Some("2020-01-01T00:00:00+0000".into()),
+            created: state::now_ts(),
+        };
+        config::save_trigger(&tmp.0, &trigger).unwrap();
+
+        let runs = mgr.trigger_tick().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "error");
+        let stored = config::list_triggers(&tmp.0).unwrap();
+        assert!(stored[0].dedup.seen.is_empty());
+        assert_eq!(stored[0].last_run, trigger.last_run);
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn fresh_trigger_is_seeded_not_fired_by_tick() {
+        let _guard = state::env_lock();
+        let tmp = Tmp::new();
+        std::env::set_var("BUGYO_CONFIG_HOME", &tmp.0);
+
+        // A fresh (never-polled) interval trigger is seeded, not fired, so a
+        // detector that would error is never invoked this pass.
+        let trigger = config::Trigger {
+            id: "t-fresh".into(),
+            name: "fresh".into(),
+            enabled: true,
+            source: config::TriggerSource::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 1".into()],
+            },
+            output_format: config::OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 3600 },
+            action: config::TriggerAction::Automation {
+                automation_id: "a1".into(),
+            },
+            mode: config::FanoutMode::FanOut,
+            max_runs_per_tick: 5,
+            dedup: config::DedupState::default(),
+            last_run: None,
+            created: state::now_ts(),
+        };
+        config::save_trigger(&tmp.0, &trigger).unwrap();
+
+        let mgr = AcpManager::default();
+        let runs = mgr.trigger_tick().await;
+        assert!(runs.is_empty(), "a fresh trigger must not fire this pass");
+        let stored = config::list_triggers(&tmp.0).unwrap();
+        assert!(
+            stored[0].last_run.is_some(),
+            "a fresh trigger must be seeded (last_run set) by the tick"
+        );
+
+        std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    // See note above: the env lock is intentionally held across awaits.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
     async fn fresh_interval_is_seeded_not_fired_by_tick() {
         let _guard = state::env_lock();
         let cfg = Tmp::new();
@@ -2689,5 +3397,65 @@ mod tests {
         assert!(run.message.unwrap().contains("no session"));
 
         std::env::remove_var("BUGYO_CONFIG_HOME");
+    }
+
+    // ---- Trigger detector boundary ---------------------------------------
+
+    #[tokio::test]
+    async fn detect_command_json_maps_items() {
+        // A read-only command emitting gh-style JSON is detected and parsed.
+        let source = config::TriggerSource::Command {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                r#"printf '[{"number":1,"title":"x"},{"number":2,"title":"y"}]'"#.into(),
+            ],
+        };
+        let items = detect(&source, config::OutputFormat::Json).await.unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "1");
+        assert_eq!(
+            items[1].fields.get("title").and_then(|v| v.as_str()),
+            Some("y")
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_command_lines_maps_items() {
+        let source = config::TriggerSource::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), r#"printf 'alpha\nbeta\n'"#.into()],
+        };
+        let items = detect(&source, config::OutputFormat::Lines).await.unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].fields.get("line").and_then(|v| v.as_str()),
+            Some("alpha")
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_command_nonzero_exit_is_error() {
+        let source = config::TriggerSource::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "echo boom >&2; exit 3".into()],
+        };
+        let err = detect(&source, config::OutputFormat::Json)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, triggers::TriggerError::Detector(_)));
+        assert!(err.to_string().contains("exited 3"));
+    }
+
+    #[tokio::test]
+    async fn detect_command_malformed_json_is_parse_error() {
+        let source = config::TriggerSource::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "printf 'not json'".into()],
+        };
+        let err = detect(&source, config::OutputFormat::Json)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, triggers::TriggerError::Parse(_)));
     }
 }

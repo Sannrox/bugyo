@@ -22,6 +22,7 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
   const removeSession = useFleet((s) => s.removeSession);
   const openInbox = useFleet((s) => s.openInbox);
   const openAutomations = useFleet((s) => s.openAutomations);
+  const openTriggers = useFleet((s) => s.openTriggers);
   const openSettings = useFleet((s) => s.openSettings);
   const openFleet = useFleet((s) => s.openFleet);
   const openSearch = useFleet((s) => s.openSearch);
@@ -87,6 +88,12 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
         label: "Automations",
         hint: "view",
         run: openAutomations,
+      },
+      {
+        id: "nav:triggers",
+        label: "Triggers",
+        hint: "view",
+        run: openTriggers,
       },
       {
         id: "nav:search",

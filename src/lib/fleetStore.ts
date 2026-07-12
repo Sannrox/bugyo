@@ -52,6 +52,7 @@ export interface FleetStore {
   panel:
     | "inbox"
     | "automations"
+    | "triggers"
     | "settings"
     | "fleet"
     | "plugins"
@@ -85,6 +86,7 @@ export interface FleetStore {
   closeSplit: () => void;
   openInbox: () => void;
   openAutomations: () => void;
+  openTriggers: () => void;
   openSettings: () => void;
   openFleet: () => void;
   openPlugins: () => void;
@@ -229,6 +231,8 @@ export const useFleet = create<FleetStore>((set, get) => ({
   openInbox: () => set({ panel: "inbox" }),
 
   openAutomations: () => set({ panel: "automations" }),
+
+  openTriggers: () => set({ panel: "triggers" }),
 
   openSettings: () => set({ panel: "settings" }),
 

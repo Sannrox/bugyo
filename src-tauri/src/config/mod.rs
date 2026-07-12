@@ -387,6 +387,210 @@ pub fn remove_automation(home: &Path, id: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+// ---- Triggers -------------------------------------------------------------
+//
+// Triggers are **event-driven** activation, complementing timer-only
+// automations. A cheap, model-free *detector* (a command/script or an HTTP GET)
+// is polled on a schedule; only when it reports genuinely-new items does the
+// trigger spend tokens by firing an action. Detection is token-free by
+// contract — the poller never invokes the model — and its output is treated as
+// untrusted data injected into the prompt as clearly-delimited context.
+
+/// Format a detector's stdout/response is parsed as.
+///
+/// - `Json` (default): an array of objects; each object's `id`/`number`/`key`
+///   becomes the item id (else a content hash), `updatedAt`-style fields become
+///   the dedup cursor, and all fields are available for context injection.
+/// - `Lines`: one item per non-empty line; the line is the content and its
+///   content-hash is the id (no cursor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum OutputFormat {
+    #[default]
+    Json,
+    Lines,
+}
+
+/// A single HTTP header for an [`TriggerSource::HttpGet`] detector. `value` may
+/// contain `${ENV_VAR}` placeholders resolved at detection time from the
+/// process environment — so secrets (tokens) are referenced by env-var name and
+/// never persisted in `triggers.json` or echoed back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// Where a trigger gets its items. No source is special-cased: watching GitHub
+/// PRs is just a `Command` running `gh pr list --json ...` or an `HttpGet`
+/// against the GitHub API with an `Authorization` header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TriggerSource {
+    /// Run a read-only command/script; parse its stdout. Spawned with explicit
+    /// args (never a shell string). Trusted as the user's own config, but its
+    /// output is still treated as untrusted data downstream.
+    Command {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// Issue a read-only HTTP GET; parse the response body. Headers may
+    /// reference env vars via `${VAR}` (resolved at call time).
+    HttpGet {
+        url: String,
+        #[serde(default)]
+        headers: Vec<HttpHeader>,
+    },
+}
+
+/// What a trigger does when it detects new items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TriggerAction {
+    /// Fire an existing automation (reuses its prompt/target/trust). Matched
+    /// context is appended to that automation's durable prompt.
+    Automation { automation_id: String },
+    /// Carry the action inline (like an automation, but event-gated). Matched
+    /// context is injected into `prompt`.
+    Inline {
+        prompt: String,
+        target: AutomationTarget,
+        #[serde(default)]
+        trust: TrustMode,
+    },
+}
+
+/// How multiple new matches in a single poll are handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum FanoutMode {
+    /// One run per matched item (each carries its own context). Capped.
+    #[default]
+    FanOut,
+    /// A single run carrying all matched items as a list. Cheapest on tokens.
+    Batch,
+}
+
+/// Internal, non-user-configured dedup state so a trigger fires once per item
+/// and survives restarts: a `watermark` (highest cursor recorded — a cheap
+/// backstop) plus a bounded `seen` set of recently-fired item ids (authoritative
+/// for catching reopened/out-of-order items). Persisted inside the trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupState {
+    #[serde(default)]
+    pub watermark: Option<String>,
+    #[serde(default)]
+    pub seen: Vec<String>,
+}
+
+fn default_max_runs_per_tick() -> usize {
+    5
+}
+
+/// An event-driven trigger: poll a detector on a schedule; fire an action for
+/// genuinely-new items (deduped), bounded by `max_runs_per_tick`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trigger {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub source: TriggerSource,
+    #[serde(default)]
+    pub output_format: OutputFormat,
+    /// How often the detector is polled (reuses the automation schedule).
+    pub schedule: Schedule,
+    pub action: TriggerAction,
+    #[serde(default)]
+    pub mode: FanoutMode,
+    /// User-chosen per-tick fire cap, clamped to a hard system ceiling
+    /// ([`crate::orchestrator::triggers::MAX_RUNS_CEILING`]).
+    #[serde(default = "default_max_runs_per_tick")]
+    pub max_runs_per_tick: usize,
+    /// Internal dedup state (not user-configured).
+    #[serde(default)]
+    pub dedup: DedupState,
+    /// Timestamp of the last poll (CLI `now_ts` format). `None` = never polled.
+    #[serde(default)]
+    pub last_run: Option<String>,
+    #[serde(default)]
+    pub created: String,
+}
+
+/// One recorded trigger run (surfaced in the UI's run history). Mirrors
+/// [`AutomationRun`], plus `matched` (how many new items this run fired on).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerRun {
+    pub ts: String,
+    pub trigger_id: String,
+    /// The session the run dispatched to / created, when applicable.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// One of: `dispatched`, `created`, `skipped`, `error`.
+    pub status: String,
+    /// How many genuinely-new items this run acted on.
+    #[serde(default)]
+    pub matched: usize,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+fn triggers_file(home: &Path) -> PathBuf {
+    home.join("triggers.json")
+}
+
+/// List persisted triggers (in stored order). Missing file → empty.
+pub fn list_triggers(home: &Path) -> Result<Vec<Trigger>, ConfigError> {
+    let path = triggers_file(home);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let contents = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&contents).unwrap_or_default())
+}
+
+fn write_triggers(home: &Path, triggers: &[Trigger]) -> Result<(), ConfigError> {
+    std::fs::create_dir_all(home)?;
+    std::fs::write(triggers_file(home), serde_json::to_string_pretty(triggers)?)?;
+    Ok(())
+}
+
+/// Upsert a trigger (by `id`). Used for both create and update.
+pub fn save_trigger(home: &Path, trigger: &Trigger) -> Result<(), ConfigError> {
+    let mut triggers = list_triggers(home)?;
+    if let Some(existing) = triggers.iter_mut().find(|t| t.id == trigger.id) {
+        *existing = trigger.clone();
+    } else {
+        triggers.push(trigger.clone());
+    }
+    write_triggers(home, &triggers)?;
+    Ok(())
+}
+
+/// Remove a trigger by id. No-op if absent.
+pub fn remove_trigger(home: &Path, id: &str) -> Result<(), ConfigError> {
+    let mut triggers = list_triggers(home)?;
+    let before = triggers.len();
+    triggers.retain(|t| t.id != id);
+    if triggers.len() != before {
+        write_triggers(home, &triggers)?;
+    }
+    Ok(())
+}
+
 // ---- Session UI metadata (pin / custom name / manual order) ---------------
 
 /// Durable, UI-facing metadata for a session: whether it's pinned, an optional
@@ -1370,6 +1574,125 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].enabled);
         assert_eq!(parsed[0].trust, TrustMode::Ask);
+        assert_eq!(parsed[0].last_run, None);
+    }
+
+    fn sample_trigger(id: &str) -> Trigger {
+        Trigger {
+            id: id.into(),
+            name: "watch PRs".into(),
+            enabled: true,
+            source: TriggerSource::Command {
+                program: "gh".into(),
+                args: vec!["pr".into(), "list".into(), "--json".into(), "number".into()],
+            },
+            output_format: OutputFormat::Json,
+            schedule: Schedule::IntervalSecs { secs: 60 },
+            action: TriggerAction::Inline {
+                prompt: "Review the new PR.".into(),
+                target: AutomationTarget::NewWorkspace {
+                    project_path: "/repo".into(),
+                    base_branch: "main".into(),
+                    branch_prefix: None,
+                    agent: None,
+                    model: None,
+                },
+                trust: TrustMode::Ask,
+            },
+            mode: FanoutMode::FanOut,
+            max_runs_per_tick: 5,
+            dedup: DedupState::default(),
+            last_run: None,
+            created: "2026-07-07T10:00:00+0200".into(),
+        }
+    }
+
+    #[test]
+    fn trigger_persistence_roundtrip() {
+        let tmp = Tmp::new();
+        // Missing file → empty.
+        assert!(list_triggers(&tmp.0).unwrap().is_empty());
+
+        let t = sample_trigger("t1");
+        save_trigger(&tmp.0, &t).unwrap();
+        save_trigger(&tmp.0, &t).unwrap(); // upsert, no duplicate
+        assert_eq!(list_triggers(&tmp.0).unwrap(), vec![t.clone()]);
+
+        // Upsert by id: editing fields (incl. dedup state) does not duplicate.
+        let mut edited = t.clone();
+        edited.name = "renamed".into();
+        edited.enabled = false;
+        edited.dedup = DedupState {
+            watermark: Some("2026-07-07T11:00:00Z".into()),
+            seen: vec!["1".into(), "2".into()],
+        };
+        edited.last_run = Some("2026-07-07T11:00:00+0200".into());
+        save_trigger(&tmp.0, &edited).unwrap();
+        let listed = list_triggers(&tmp.0).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "renamed");
+        assert!(!listed[0].enabled);
+        assert_eq!(listed[0].dedup.seen, vec!["1".to_string(), "2".to_string()]);
+
+        // A second trigger appends.
+        save_trigger(&tmp.0, &sample_trigger("t2")).unwrap();
+        assert_eq!(list_triggers(&tmp.0).unwrap().len(), 2);
+
+        // Remove by id; absent id is a no-op.
+        remove_trigger(&tmp.0, "t1").unwrap();
+        let listed = list_triggers(&tmp.0).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "t2");
+        remove_trigger(&tmp.0, "nope").unwrap();
+        assert_eq!(list_triggers(&tmp.0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn trigger_source_action_serialize_tagged() {
+        let http = TriggerSource::HttpGet {
+            url: "https://api.github.com/repos/o/r/pulls".into(),
+            headers: vec![HttpHeader {
+                name: "Authorization".into(),
+                value: "Bearer ${GITHUB_TOKEN}".into(),
+            }],
+        };
+        let v = serde_json::to_value(&http).unwrap();
+        assert_eq!(v["type"], "httpGet");
+        assert_eq!(v["url"], "https://api.github.com/repos/o/r/pulls");
+        assert_eq!(v["headers"][0]["name"], "Authorization");
+
+        let action = TriggerAction::Automation {
+            automation_id: "a1".into(),
+        };
+        let av = serde_json::to_value(&action).unwrap();
+        assert_eq!(av["type"], "automation");
+        assert_eq!(av["automationId"], "a1");
+
+        // Simple enums serialize as camelCase strings.
+        assert_eq!(
+            serde_json::to_value(OutputFormat::Lines).unwrap(),
+            serde_json::json!("lines")
+        );
+        assert_eq!(
+            serde_json::to_value(FanoutMode::Batch).unwrap(),
+            serde_json::json!("batch")
+        );
+    }
+
+    #[test]
+    fn trigger_defaults_when_fields_absent() {
+        // A minimal stored trigger deserializes with sane defaults.
+        let json = r#"[{"id":"t1","name":"n",
+            "source":{"type":"command","program":"gh"},
+            "schedule":{"type":"intervalSecs","secs":60},
+            "action":{"type":"automation","automationId":"a1"}}]"#;
+        let parsed: Vec<Trigger> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].enabled);
+        assert_eq!(parsed[0].output_format, OutputFormat::Json);
+        assert_eq!(parsed[0].mode, FanoutMode::FanOut);
+        assert_eq!(parsed[0].max_runs_per_tick, 5);
+        assert_eq!(parsed[0].dedup, DedupState::default());
         assert_eq!(parsed[0].last_run, None);
     }
 
