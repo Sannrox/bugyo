@@ -118,17 +118,45 @@ describe("Triggers panel", () => {
     );
   });
 
-  it("runs a trigger now through triggerRunNow and shows it in history", async () => {
+  it("confirms before firing and relies on the event stream for history", async () => {
     render(<Triggers />);
     await waitFor(() => screen.getByText("new PRs"));
 
-    fireEvent.click(screen.getByLabelText("run new PRs now"));
-    const { triggerRunNow } = await import("./lib/ipc");
+    fireEvent.click(screen.getByLabelText("test and fire new PRs"));
+    const { confirmDialog, triggerRunNow } = await import("./lib/ipc");
+    await waitFor(() =>
+      expect(confirmDialog).toHaveBeenCalledWith(
+        expect.stringMatching(/spend tokens.*same work again/i),
+        "Test & fire trigger",
+      ),
+    );
     await waitFor(() => expect(triggerRunNow).toHaveBeenCalledWith("t1"));
+    expect(screen.queryByText("dispatched")).not.toBeInTheDocument();
+
+    onRunHandler?.({
+      ts: "2026-07-07T12:00:00+0200",
+      triggerId: "t1",
+      sessionId: "sess-1234abcd",
+      status: "dispatched",
+      matched: 2,
+      message: null,
+    });
 
     await waitFor(() =>
       expect(screen.getByText("dispatched")).toBeInTheDocument(),
     );
+    expect(screen.getAllByText("dispatched")).toHaveLength(1);
+  });
+
+  it("does not fire when the test confirmation is cancelled", async () => {
+    const { confirmDialog, triggerRunNow } = await import("./lib/ipc");
+    vi.mocked(confirmDialog).mockResolvedValueOnce(false);
+    render(<Triggers />);
+    await waitFor(() => screen.getByText("new PRs"));
+
+    fireEvent.click(screen.getByLabelText("test and fire new PRs"));
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalled());
+    expect(triggerRunNow).not.toHaveBeenCalled();
   });
 
   it("creates a command trigger with an inline new-workspace action", async () => {
@@ -271,7 +299,9 @@ describe("Triggers panel", () => {
       message: null,
     });
 
-    await waitFor(() => expect(screen.getByText("created")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("created")).toBeInTheDocument(),
+    );
   });
 
   it("deletes a trigger only after confirmation", async () => {

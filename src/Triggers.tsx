@@ -126,11 +126,18 @@ export default function Triggers() {
 
   async function runNow(id: string) {
     if (action) return;
+    const trigger = items.find((item) => item.id === id);
+    const ok = await confirmDialog(
+      `Test and fire trigger "${trigger?.name ?? id}"? This polls the detector ` +
+        "and dispatches every new match, which may spend tokens. Matches are not " +
+        "consumed, so running it again can dispatch the same work again.",
+      "Test & fire trigger",
+    );
+    if (!ok) return;
     try {
       setAction(`run:${id}`);
       setError("");
-      const run = await triggerRunNow(id);
-      setRuns((r) => [run, ...r].slice(0, 50));
+      await triggerRunNow(id);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -214,11 +221,11 @@ export default function Triggers() {
                 type="button"
                 className="pane__action"
                 onClick={() => void runNow(t.id)}
-                aria-label={`run ${t.name} now`}
+                aria-label={`test and fire ${t.name}`}
                 disabled={Boolean(action)}
               >
                 <Play size={13} aria-hidden />
-                {action === `run:${t.id}` ? "Running…" : "Run now"}
+                {action === `run:${t.id}` ? "Running…" : "Test & fire"}
               </button>
               <button
                 type="button"
@@ -423,15 +430,19 @@ function TriggerForm({
       : "ask",
   );
   const [trustTools, setTrustTools] = useState(
-    initial?.action.type === "inline" && initial.action.trust.type ===
-    "trustTools"
+    initial?.action.type === "inline" &&
+      initial.action.trust.type === "trustTools"
       ? initial.action.trust.tools.join(", ")
       : "",
   );
 
   function buildSource(): TriggerSource {
     if (sourceKind === "command") {
-      return { type: "command", program: program.trim(), args: splitLines(args) };
+      return {
+        type: "command",
+        program: program.trim(),
+        args: splitLines(args),
+      };
     }
     return { type: "httpGet", url: url.trim(), headers: parseHeaders(headers) };
   }
@@ -480,7 +491,12 @@ function TriggerForm({
   function buildAction(): TriggerAction {
     return actionKind === "automation"
       ? { type: "automation", automationId }
-      : { type: "inline", prompt: prompt.trim(), target: buildTarget(), trust: buildTrust() };
+      : {
+          type: "inline",
+          prompt: prompt.trim(),
+          target: buildTarget(),
+          trust: buildTrust(),
+        };
   }
 
   const sourceReady =
@@ -541,9 +557,7 @@ function TriggerForm({
       <div className="automations__formhead">
         <div>
           <strong>{initial ? "Edit trigger" : "Create trigger"}</strong>
-          <p>
-            Define what to watch, then what happens when new items appear.
-          </p>
+          <p>Define what to watch, then what happens when new items appear.</p>
         </div>
         <button type="button" className="pane__action" onClick={onCancel}>
           Cancel

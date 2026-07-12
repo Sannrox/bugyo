@@ -14,7 +14,7 @@ to answer "is there anything to do?". For watch-style work ("react when a new PR
 appears", "when CI goes red", "when a feed updates") that is mostly wasted spend:
 the model is invoked on every tick regardless of whether anything changed.
 
-**Triggers** add **event-driven** activation. A cheap, model-free *detector* is
+**Triggers** add **event-driven** activation. A cheap, model-free _detector_ is
 polled on a schedule; only when it reports genuinely-new items does the trigger
 spend tokens by firing an action. This explicitly **supersedes the "timer only,
 no event triggers" scope note in [0002](./0002-automations.md)** — automations
@@ -64,7 +64,7 @@ access to the ACP client.
 
 ### 4. Dedup is internal — a watermark plus a bounded seen-set
 
-Users configure *what* to watch, never *how* de-duplication works.
+Users configure _what_ to watch, never _how_ de-duplication works.
 `config::DedupState` holds:
 
 - a **`seen`** set of recently-fired item ids — authoritative, catching
