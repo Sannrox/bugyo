@@ -1438,8 +1438,14 @@ pub async fn detect(
     format: config::OutputFormat,
 ) -> Result<Vec<triggers::DetectedItem>, triggers::TriggerError> {
     let raw = match source {
-        config::TriggerSource::Command { program, args } => {
-            run_detector_command(program, args).await?
+        config::TriggerSource::Command { program, args, cwd } => {
+            let cwd = cwd.as_deref().filter(|path| !path.trim().is_empty()).ok_or_else(|| {
+                triggers::TriggerError::Detector(
+                    "command detector has no working directory; edit the trigger and select a workspace"
+                        .to_string(),
+                )
+            })?;
+            run_detector_command(program, args, cwd).await?
         }
         config::TriggerSource::HttpGet { url, headers } => http_get(url, headers).await?,
     };
@@ -1451,12 +1457,17 @@ pub async fn detect(
 async fn run_detector_command(
     program: &str,
     args: &[String],
+    cwd: &str,
 ) -> Result<String, triggers::TriggerError> {
     let program = program.to_string();
     let args = args.to_vec();
+    let cwd = cwd.to_string();
     let label = program.clone();
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&program).args(&args).output()
+        std::process::Command::new(&program)
+            .args(&args)
+            .current_dir(&cwd)
+            .output()
     })
     .await
     .map_err(|e| triggers::TriggerError::Detector(format!("spawn task failed: {e}")))?
@@ -1894,6 +1905,7 @@ pub fn trigger_list() -> Result<Vec<config::Trigger>, String> {
 #[tauri::command]
 pub fn trigger_create(mut trigger: config::Trigger) -> Result<config::Trigger, String> {
     crate::orchestrator::schedule::validate(&trigger.schedule).map_err(|e| e.to_string())?;
+    validate_trigger_source(&trigger.source)?;
     if trigger.id.trim().is_empty() {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1916,6 +1928,7 @@ pub fn trigger_create(mut trigger: config::Trigger) -> Result<config::Trigger, S
 #[tauri::command]
 pub fn trigger_update(trigger: config::Trigger) -> Result<config::Trigger, String> {
     crate::orchestrator::schedule::validate(&trigger.schedule).map_err(|e| e.to_string())?;
+    validate_trigger_source(&trigger.source)?;
     let home = config::config_home();
     // Preserve internal dedup state + last_run across edits so re-saving a
     // trigger from the UI can't cause it to re-fire on already-seen items.
@@ -1930,6 +1943,26 @@ pub fn trigger_update(trigger: config::Trigger) -> Result<config::Trigger, Strin
     }
     config::save_trigger(&home, &trigger).map_err(|e| e.to_string())?;
     Ok(trigger)
+}
+
+fn validate_trigger_source(source: &config::TriggerSource) -> Result<(), String> {
+    let config::TriggerSource::Command { cwd, .. } = source else {
+        return Ok(());
+    };
+    let cwd = cwd
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| "command detector working directory is required".to_string())?;
+    let path = std::path::Path::new(cwd);
+    if !path.is_absolute() {
+        return Err("command detector working directory must be an absolute path".to_string());
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "command detector working directory does not exist or is not a directory: {cwd}"
+        ));
+    }
+    Ok(())
 }
 
 /// Remove a trigger by id.
@@ -3003,6 +3036,7 @@ mod tests {
             source: config::TriggerSource::Command {
                 program: "true".into(),
                 args: vec![],
+                cwd: Some("/tmp".into()),
             },
             output_format: config::OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 60 },
@@ -3068,6 +3102,7 @@ mod tests {
             source: config::TriggerSource::Command {
                 program: "true".into(),
                 args: vec![],
+                cwd: Some("/tmp".into()),
             },
             output_format: config::OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 60 },
@@ -3124,6 +3159,7 @@ mod tests {
             source: config::TriggerSource::Command {
                 program: "true".into(),
                 args: vec![],
+                cwd: Some("/tmp".into()),
             },
             output_format: config::OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 60 },
@@ -3161,6 +3197,7 @@ mod tests {
             source: config::TriggerSource::Command {
                 program: "sh".into(),
                 args: vec!["-c".into(), r#"printf '[{"id":"pr-1"}]'"#.into()],
+                cwd: Some("/tmp".into()),
             },
             output_format: config::OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 1 },
@@ -3216,6 +3253,7 @@ mod tests {
             source: config::TriggerSource::Command {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 2".into()],
+                cwd: Some("/tmp".into()),
             },
             output_format: config::OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 1 },
@@ -3260,6 +3298,7 @@ mod tests {
             source: config::TriggerSource::Command {
                 program: "sh".into(),
                 args: vec!["-c".into(), r#"printf '[{"id":"pr-1"}]'"#.into()],
+                cwd: Some("/tmp".into()),
             },
             output_format: config::OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 1 },
@@ -3304,6 +3343,7 @@ mod tests {
             source: config::TriggerSource::Command {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 1".into()],
+                cwd: Some("/tmp".into()),
             },
             output_format: config::OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 3600 },
@@ -3410,6 +3450,7 @@ mod tests {
                 "-c".into(),
                 r#"printf '[{"number":1,"title":"x"},{"number":2,"title":"y"}]'"#.into(),
             ],
+            cwd: Some("/tmp".into()),
         };
         let items = detect(&source, config::OutputFormat::Json).await.unwrap();
         assert_eq!(items.len(), 2);
@@ -3425,6 +3466,7 @@ mod tests {
         let source = config::TriggerSource::Command {
             program: "sh".into(),
             args: vec!["-c".into(), r#"printf 'alpha\nbeta\n'"#.into()],
+            cwd: Some("/tmp".into()),
         };
         let items = detect(&source, config::OutputFormat::Lines).await.unwrap();
         assert_eq!(items.len(), 2);
@@ -3435,10 +3477,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detect_command_runs_in_configured_working_directory() {
+        let tmp = Tmp::new();
+        let source = config::TriggerSource::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "pwd".into()],
+            cwd: Some(tmp.0.to_string_lossy().into_owned()),
+        };
+        let items = detect(&source, config::OutputFormat::Lines).await.unwrap();
+        let expected = std::fs::canonicalize(&tmp.0).unwrap();
+        assert_eq!(
+            items[0].fields.get("line").and_then(|value| value.as_str()),
+            Some(expected.to_string_lossy().as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_legacy_command_without_working_directory_is_error() {
+        let source = config::TriggerSource::Command {
+            program: "pwd".into(),
+            args: vec![],
+            cwd: None,
+        };
+        let err = detect(&source, config::OutputFormat::Lines)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no working directory"));
+    }
+
+    #[tokio::test]
     async fn detect_command_nonzero_exit_is_error() {
         let source = config::TriggerSource::Command {
             program: "sh".into(),
             args: vec!["-c".into(), "echo boom >&2; exit 3".into()],
+            cwd: Some("/tmp".into()),
         };
         let err = detect(&source, config::OutputFormat::Json)
             .await
@@ -3452,6 +3524,7 @@ mod tests {
         let source = config::TriggerSource::Command {
             program: "sh".into(),
             args: vec!["-c".into(), "printf 'not json'".into()],
+            cwd: Some("/tmp".into()),
         };
         let err = detect(&source, config::OutputFormat::Json)
             .await

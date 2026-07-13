@@ -318,7 +318,7 @@ export interface HttpHeader {
 
 /** Mirrors `config::TriggerSource` — where a trigger gets its items. */
 export type TriggerSource =
-  | { type: "command"; program: string; args: string[] }
+  | { type: "command"; program: string; args: string[]; cwd: string | null }
   | { type: "httpGet"; url: string; headers: HttpHeader[] };
 
 /** Mirrors `config::TriggerAction` — what a trigger does on new items. */

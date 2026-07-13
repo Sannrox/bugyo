@@ -472,6 +472,7 @@ mod tests {
             source: TriggerSource::Command {
                 program: "true".into(),
                 args: vec![],
+                cwd: Some("/tmp".into()),
             },
             output_format: OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 300 },

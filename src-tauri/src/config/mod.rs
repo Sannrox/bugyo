@@ -439,6 +439,11 @@ pub enum TriggerSource {
         program: String,
         #[serde(default)]
         args: Vec<String>,
+        /// Directory in which the detector command runs. Optional only for
+        /// backwards-compatible deserialization of triggers created before
+        /// detector working directories were persisted.
+        #[serde(default)]
+        cwd: Option<String>,
     },
     /// Issue a read-only HTTP GET; parse the response body. Headers may
     /// reference env vars via `${VAR}` (resolved at call time).
@@ -1585,6 +1590,7 @@ mod tests {
             source: TriggerSource::Command {
                 program: "gh".into(),
                 args: vec!["pr".into(), "list".into(), "--json".into(), "number".into()],
+                cwd: Some("/repo".into()),
             },
             output_format: OutputFormat::Json,
             schedule: Schedule::IntervalSecs { secs: 60 },
@@ -1661,6 +1667,14 @@ mod tests {
         assert_eq!(v["url"], "https://api.github.com/repos/o/r/pulls");
         assert_eq!(v["headers"][0]["name"], "Authorization");
 
+        let command = TriggerSource::Command {
+            program: "gh".into(),
+            args: vec!["pr".into(), "list".into()],
+            cwd: Some("/repo".into()),
+        };
+        let cv = serde_json::to_value(&command).unwrap();
+        assert_eq!(cv["cwd"], "/repo");
+
         let action = TriggerAction::Automation {
             automation_id: "a1".into(),
         };
@@ -1694,6 +1708,10 @@ mod tests {
         assert_eq!(parsed[0].max_runs_per_tick, 5);
         assert_eq!(parsed[0].dedup, DedupState::default());
         assert_eq!(parsed[0].last_run, None);
+        assert!(matches!(
+            &parsed[0].source,
+            TriggerSource::Command { cwd: None, .. }
+        ));
     }
 
     #[test]

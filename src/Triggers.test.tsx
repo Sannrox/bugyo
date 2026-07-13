@@ -11,6 +11,7 @@ const existing: Trigger = {
     type: "command",
     program: "gh",
     args: ["pr", "list", "--json", "number,title,url,updatedAt"],
+    cwd: "/repo",
   },
   outputFormat: "json",
   schedule: { type: "intervalSecs", secs: 300 },
@@ -201,6 +202,7 @@ describe("Triggers panel", () => {
             type: "command",
             program: "gh",
             args: ["pr", "list", "--json", "number"],
+            cwd: "/repo",
           },
           outputFormat: "json",
           mode: "fanOut",
@@ -281,7 +283,7 @@ describe("Triggers panel", () => {
     await waitFor(() => screen.getByText("new PRs"));
     fireEvent.click(screen.getByRole("button", { name: /new trigger/i }));
     expect(
-      screen.getByText(/runs on your machine with your permissions/i),
+      screen.getByText(/runs in this directory.*with your permissions/i),
     ).toBeInTheDocument();
   });
 
