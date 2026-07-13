@@ -25,11 +25,6 @@ pub enum WorkspaceError {
     InvalidPath(String),
     #[error("setup script failed (exit {code}): {stderr}")]
     SetupScript { code: i32, stderr: String },
-    #[error(
-        "repository HEAD is '{head}', expected base branch '{expected}'; \
-         check out '{expected}' before merging"
-    )]
-    WrongBaseBranch { head: String, expected: String },
 }
 
 /// A created workspace: an isolated git worktree on its own branch.
@@ -264,12 +259,13 @@ pub struct ReviewCheck {
     pub change_fingerprint: String,
 }
 
-/// Durable landing outcome for a workspace.
+/// Durable landing outcome for a workspace. kiro's flow is git-only: the agent
+/// commits its reviewed work and the human pushes the branch to `origin`. There
+/// is no local merge or hosted pull/merge request (no `gh`/`glab`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum LandingState {
-    PullRequest { url: String },
-    Merged,
+    Pushed,
 }
 
 /// Review metadata persisted with the session descriptor.
@@ -288,10 +284,8 @@ pub struct ReviewRecord {
 pub enum ReviewStage {
     Active,
     NeedsReview,
-    ChecksFailed,
     ReadyToLand,
-    PullRequestOpen,
-    Merged,
+    Pushed,
 }
 
 /// Current review state, combining durable check/landing metadata with the
@@ -305,7 +299,6 @@ pub struct ReviewState {
     pub has_uncommitted_changes: bool,
     pub changed_files: Vec<String>,
     pub last_check: Option<ReviewCheck>,
-    pub pull_request_url: Option<String>,
 }
 
 fn untracked_files(worktree_path: &Path) -> Result<Vec<String>, WorkspaceError> {
@@ -364,6 +357,19 @@ fn change_fingerprint(workspace: &Workspace) -> Result<String, WorkspaceError> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
+/// Whether the workspace HEAD is still the commit recorded by Git as its
+/// upstream. `push -u` updates that tracking ref, so a later local commit makes
+/// this false without requiring extra review metadata or a remote fetch.
+fn head_matches_upstream(worktree_path: &Path) -> bool {
+    let Ok(head) = run_git(worktree_path, &["rev-parse", "HEAD"]) else {
+        return false;
+    };
+    let Ok(upstream) = run_git(worktree_path, &["rev-parse", "@{upstream}"]) else {
+        return false;
+    };
+    head == upstream
+}
+
 /// Stage and commit every reviewed workspace change with an explicit message.
 pub fn commit_all(worktree_path: &Path, message: &str) -> Result<(), WorkspaceError> {
     if message.trim().is_empty() {
@@ -396,32 +402,31 @@ pub fn review_state(
     files.extend(untracked);
     let changed_files: Vec<String> = files.into_iter().collect();
     let has_changes = !changed_files.is_empty();
-    let fingerprint = change_fingerprint(workspace)?;
-    let check_is_current = record
-        .last_check
-        .as_ref()
-        .is_some_and(|check| check.change_fingerprint == fingerprint);
+    let has_uncommitted_changes = !status_lines.is_empty();
 
-    let (stage, pull_request_url) = match &record.landing {
-        Some(LandingState::Merged) => (ReviewStage::Merged, None),
-        Some(LandingState::PullRequest { url }) => {
-            (ReviewStage::PullRequestOpen, Some(url.clone()))
-        }
-        None if !has_changes => (ReviewStage::Active, None),
-        None if check_is_current && record.last_check.as_ref().is_some_and(|c| c.success) => {
-            (ReviewStage::ReadyToLand, None)
-        }
-        None if check_is_current => (ReviewStage::ChecksFailed, None),
-        None => (ReviewStage::NeedsReview, None),
+    // Landing readiness is a function of commit state, not verification. The
+    // agent is responsible for verifying its own work (via its own tools or a
+    // Kiro hook the user configures); the harness never grades it. A human is
+    // the final gate: they review the diff and choose to land. Any recorded
+    // `last_check` is surfaced purely as informational evidence and never
+    // blocks the flow.
+    let stage = match &record.landing {
+        None if !has_changes => ReviewStage::Active,
+        // Uncommitted changes must be committed before a human can land them.
+        _ if has_uncommitted_changes => ReviewStage::NeedsReview,
+        // A push only remains current while the local branch still points at
+        // the upstream commit updated by `git push -u`.
+        Some(LandingState::Pushed) if head_matches_upstream(root) => ReviewStage::Pushed,
+        // Committed changes on a clean worktree: ready for a human to land.
+        _ => ReviewStage::ReadyToLand,
     };
 
     Ok(ReviewState {
         stage,
         has_changes,
-        has_uncommitted_changes: !status_lines.is_empty(),
+        has_uncommitted_changes,
         changed_files,
         last_check: record.last_check.clone(),
-        pull_request_url,
     })
 }
 
@@ -457,83 +462,6 @@ pub fn run_check(worktree_path: &Path, script: &str) -> Result<CheckResult, Work
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
-}
-
-/// Push the branch and open a pull/merge request via `gh` (GitHub) or `glab`
-/// (GitLab). Returns the tool's stdout (typically the PR/MR URL).
-///
-/// Inherently environment-dependent: needs a remote, push credentials, and
-/// `gh`/`glab` installed and authenticated.
-pub fn open_pr(
-    repo_root: &Path,
-    branch: &str,
-    title: Option<&str>,
-) -> Result<String, WorkspaceError> {
-    run_git(repo_root, &["push", "-u", "origin", branch])?;
-
-    let has = |bin: &str| {
-        Command::new("sh")
-            .arg("-c")
-            .arg(format!("command -v {bin}"))
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-
-    let (program, args): (&str, Vec<String>) = if has("gh") {
-        let mut a = vec![
-            "pr".to_string(),
-            "create".to_string(),
-            "--head".to_string(),
-            branch.to_string(),
-        ];
-        match title {
-            Some(t) => {
-                a.push("--title".into());
-                a.push(t.to_string());
-                a.push("--body".into());
-                a.push(String::new());
-            }
-            None => a.push("--fill".into()),
-        }
-        ("gh", a)
-    } else if has("glab") {
-        let mut a = vec![
-            "mr".to_string(),
-            "create".to_string(),
-            "--source-branch".to_string(),
-            branch.to_string(),
-        ];
-        match title {
-            Some(t) => {
-                a.push("--title".into());
-                a.push(t.to_string());
-                a.push("--description".into());
-                a.push(String::new());
-            }
-            None => a.push("--fill".into()),
-        }
-        ("glab", a)
-    } else {
-        return Err(WorkspaceError::Git {
-            op: "open_pr".into(),
-            stderr: "neither `gh` nor `glab` found on PATH".into(),
-        });
-    };
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = Command::new(program)
-        .current_dir(repo_root)
-        .args(&arg_refs)
-        .output()?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(WorkspaceError::Git {
-            op: format!("{program} create"),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        })
-    }
 }
 
 /// List worktree paths registered on the repo (`git worktree list --porcelain`).
@@ -617,81 +545,16 @@ pub fn rollback_create(
     Ok(())
 }
 
-/// Merge a workspace branch into the recorded base branch of `repo_root`
-/// (no-ff). Refuses to merge unless `repo_root`'s current HEAD is exactly
-/// `base_branch`: the workspace was cut from `base_branch`, and merging into
-/// whatever happens to be checked out could silently land approved work on the
-/// wrong branch. A detached HEAD reports `"HEAD"` and is likewise refused.
-pub fn merge(repo_root: &Path, base_branch: &str, branch: &str) -> Result<(), WorkspaceError> {
-    let head = current_branch(repo_root)?;
-    if head != base_branch {
-        return Err(WorkspaceError::WrongBaseBranch {
-            head,
-            expected: base_branch.to_string(),
-        });
-    }
-    run_git(
-        repo_root,
-        &["merge", "--no-ff", branch, "-m", &format!("merge {branch}")],
-    )?;
+/// Push the workspace branch to `origin`, setting upstream on the first push
+/// (`git push -u origin <branch>`). This is how kiro lands work: the reviewed
+/// commits go to the remote branch, where they are picked up by whatever review
+/// process the team runs. There is no local merge and no hosted PR/MR creation
+/// (no `gh`/`glab`) — just git.
+///
+/// Environment-dependent: needs an `origin` remote and push credentials.
+pub fn push(repo_root: &Path, branch: &str) -> Result<(), WorkspaceError> {
+    run_git(repo_root, &["push", "-u", "origin", branch])?;
     Ok(())
-}
-
-/// Result of a non-mutating pre-merge check.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MergePreview {
-    /// Whether merging `branch` into the base would apply cleanly.
-    pub clean: bool,
-    /// Paths that would conflict (best-effort; empty when clean).
-    pub conflicted_files: Vec<String>,
-}
-
-/// Predict whether merging `branch` into `base_branch` is clean — **without**
-/// touching the working tree, index, or refs. Uses `git merge-tree
-/// --write-tree` (git ≥ 2.38), which computes the merge in-memory: exit 0 =
-/// clean, exit 1 = conflicts (stdout lists the conflicted paths after the
-/// resulting tree OID), any other exit = a real error.
-pub fn merge_preview(
-    repo_root: &Path,
-    base_branch: &str,
-    branch: &str,
-) -> Result<MergePreview, WorkspaceError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args([
-            "merge-tree",
-            "--write-tree",
-            "--name-only",
-            base_branch,
-            branch,
-        ])
-        .output()?;
-    match output.status.code() {
-        Some(0) => Ok(MergePreview {
-            clean: true,
-            conflicted_files: vec![],
-        }),
-        Some(1) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Line 1 is the merged tree OID; the rest are conflicted paths.
-            let conflicted_files = stdout
-                .lines()
-                .skip(1)
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect();
-            Ok(MergePreview {
-                clean: false,
-                conflicted_files,
-            })
-        }
-        _ => Err(WorkspaceError::Git {
-            op: "merge-tree".to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        }),
-    }
 }
 
 /// The repository's current branch name (`git rev-parse --abbrev-ref HEAD`).
@@ -783,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn review_state_tracks_checks_and_invalidates_them_on_change() {
+    fn review_state_stages_on_commit_state_not_checks() {
         let tmp = Tmp::new("review-state");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -791,11 +654,13 @@ mod tests {
         let workspace = create(&repo, "main", "review flow", &tmp.path().join("wts")).unwrap();
         let mut record = ReviewRecord::default();
 
+        // No changes yet.
         assert_eq!(
             review_state(&workspace, &record).unwrap().stage,
             ReviewStage::Active
         );
 
+        // Uncommitted changes must be committed before a human can land them.
         let changed = Path::new(&workspace.worktree_path).join("review.txt");
         std::fs::write(&changed, "first\n").unwrap();
         let pending = review_state(&workspace, &record).unwrap();
@@ -811,6 +676,8 @@ mod tests {
         assert!(patch.contains("diff --git"));
         assert!(patch.contains("+first"));
 
+        // A recorded check is informational only: it does NOT advance the stage.
+        // While changes remain uncommitted the workspace still Needs review.
         let passed = run_check(Path::new(&workspace.worktree_path), "true").unwrap();
         record_check(
             &workspace,
@@ -822,20 +689,23 @@ mod tests {
         .unwrap();
         assert_eq!(
             review_state(&workspace, &record).unwrap().stage,
-            ReviewStage::ReadyToLand
+            ReviewStage::NeedsReview
         );
 
+        // Committing (with no check at all) is what makes it ready to land.
         commit_all(Path::new(&workspace.worktree_path), "reviewed changes").unwrap();
         let committed = review_state(&workspace, &record).unwrap();
         assert_eq!(committed.stage, ReviewStage::ReadyToLand);
         assert!(!committed.has_uncommitted_changes);
 
-        std::fs::write(&changed, "changed after checks\n").unwrap();
+        // New uncommitted edits drop back to NeedsReview regardless of checks.
+        std::fs::write(&changed, "changed after commit\n").unwrap();
         assert_eq!(
             review_state(&workspace, &record).unwrap().stage,
             ReviewStage::NeedsReview
         );
 
+        // A failing check likewise does not gate: stage stays commit-driven.
         let failed = run_check(Path::new(&workspace.worktree_path), "false").unwrap();
         record_check(
             &workspace,
@@ -847,7 +717,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             review_state(&workspace, &record).unwrap().stage,
-            ReviewStage::ChecksFailed
+            ReviewStage::NeedsReview
         );
     }
 
@@ -928,11 +798,13 @@ mod tests {
         let ws = create(&repo, "main", "tmp-work", &wt_root).unwrap();
         let wt = Path::new(&ws.worktree_path).to_path_buf();
 
-        // Commit so the branch is mergeable, merge it, then archive cleanly.
+        // Commit so the branch is mergeable, merge it into main (raw git — the
+        // app no longer merges), then archive: `branch -d` deletes the merged
+        // branch cleanly.
         std::fs::write(wt.join("x.txt"), "x\n").unwrap();
         run_git(&wt, &["add", "-A"]).unwrap();
         run_git(&wt, &["commit", "-q", "-m", "x"]).unwrap();
-        merge(&repo, "main", &ws.branch).unwrap();
+        run_git(&repo, &["merge", "--no-ff", "-m", "merge", &ws.branch]).unwrap();
 
         archive(&repo, &wt, &ws.branch, false).unwrap();
         assert!(!wt.exists());
@@ -978,73 +850,76 @@ mod tests {
     }
 
     #[test]
-    fn merge_refuses_when_head_is_not_base_branch() {
-        let tmp = Tmp::new("wrongbase");
+    fn push_sends_branch_to_origin_and_sets_upstream() {
+        let tmp = Tmp::new("push");
+        let origin = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        // A bare repo to act as `origin`.
+        assert!(Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&origin)
+            .status()
+            .unwrap()
+            .success());
+
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         init_repo(&repo);
+        run_git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        )
+        .unwrap();
+
         let wt_root = tmp.path().join("wts");
-        let ws = create(&repo, "main", "wb-work", &wt_root).unwrap();
+        let ws = create(&repo, "main", "push-work", &wt_root).unwrap();
         let wt = Path::new(&ws.worktree_path).to_path_buf();
-
-        std::fs::write(wt.join("x.txt"), "x\n").unwrap();
+        std::fs::write(wt.join("p.txt"), "p\n").unwrap();
         run_git(&wt, &["add", "-A"]).unwrap();
-        run_git(&wt, &["commit", "-q", "-m", "x"]).unwrap();
+        run_git(&wt, &["commit", "-q", "-m", "push work"]).unwrap();
 
-        // Move the repo's HEAD off `main` onto another branch.
-        run_git(&repo, &["checkout", "-q", "-b", "other"]).unwrap();
+        push(&repo, &ws.branch).unwrap();
 
-        let err = merge(&repo, "main", &ws.branch).unwrap_err();
-        assert!(
-            matches!(&err, WorkspaceError::WrongBaseBranch { head, expected }
-                if head == "other" && expected == "main"),
-            "expected WrongBaseBranch, got {err:?}"
+        let record = ReviewRecord {
+            landing: Some(LandingState::Pushed),
+            ..ReviewRecord::default()
+        };
+        assert_eq!(
+            review_state(&ws, &record).unwrap().stage,
+            ReviewStage::Pushed
         );
 
-        // No merge happened: `other` has no merge commit for the branch.
-        let log = run_git(&repo, &["log", "--oneline"]).unwrap();
-        assert!(!log.contains(&format!("merge {}", ws.branch)), "log: {log}");
-    }
-
-    #[test]
-    fn merge_preview_reports_clean_and_conflicts() {
-        let tmp = Tmp::new("mtpreview");
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo);
-        let wt_root = tmp.path().join("wts");
-
-        // A clean branch: adds a new file, no overlap with main.
-        let clean = create(&repo, "main", "feat-clean", &wt_root).unwrap();
-        let clean_wt = Path::new(&clean.worktree_path).to_path_buf();
-        std::fs::write(clean_wt.join("new.txt"), "hello\n").unwrap();
-        run_git(&clean_wt, &["add", "-A"]).unwrap();
-        run_git(&clean_wt, &["commit", "-q", "-m", "add new"]).unwrap();
-
-        let preview = merge_preview(&repo, "main", &clean.branch).unwrap();
-        assert!(preview.clean, "expected clean, got {preview:?}");
-        assert!(preview.conflicted_files.is_empty());
-
-        // A conflicting branch: edits file.txt's only line; main edits it too.
-        let conf = create(&repo, "main", "feat-conf", &wt_root).unwrap();
-        let conf_wt = Path::new(&conf.worktree_path).to_path_buf();
-        std::fs::write(conf_wt.join("file.txt"), "feature\n").unwrap();
-        run_git(&conf_wt, &["add", "-A"]).unwrap();
-        run_git(&conf_wt, &["commit", "-q", "-m", "feature edit"]).unwrap();
-        // Diverge main on the same line.
-        std::fs::write(repo.join("file.txt"), "mainline\n").unwrap();
-        run_git(&repo, &["add", "-A"]).unwrap();
-        run_git(&repo, &["commit", "-q", "-m", "main edit"]).unwrap();
-
-        let preview = merge_preview(&repo, "main", &conf.branch).unwrap();
-        assert!(!preview.clean, "expected conflict, got {preview:?}");
+        // The branch now exists on origin.
+        let remote_refs = run_git(&repo, &["ls-remote", "--heads", "origin"]).unwrap();
         assert!(
-            preview
-                .conflicted_files
-                .iter()
-                .any(|f| f.contains("file.txt")),
-            "expected file.txt in conflicts, got {:?}",
-            preview.conflicted_files
+            remote_refs.contains(&ws.branch),
+            "expected {} on origin, got {remote_refs}",
+            ws.branch
+        );
+        // Upstream was set (`-u`): the worktree branch tracks origin/<branch>.
+        let upstream = run_git(
+            &wt,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ],
+        )
+        .unwrap();
+        assert_eq!(upstream, format!("origin/{}", ws.branch));
+
+        // Further work invalidates the durable pushed outcome. Uncommitted
+        // edits need review; once committed, the new HEAD is ready to push.
+        std::fs::write(wt.join("p.txt"), "changed after push\n").unwrap();
+        assert_eq!(
+            review_state(&ws, &record).unwrap().stage,
+            ReviewStage::NeedsReview
+        );
+        commit_all(&wt, "more work").unwrap();
+        assert_eq!(
+            review_state(&ws, &record).unwrap().stage,
+            ReviewStage::ReadyToLand
         );
     }
 

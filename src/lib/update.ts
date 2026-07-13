@@ -6,6 +6,7 @@
 
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 
 /** Human-facing summary of an available update (safe to render). */
 export interface AvailableUpdate {
@@ -24,6 +25,22 @@ export type UpdateCheck =
   | { status: "available"; update: Update; info: AvailableUpdate }
   | { status: "uptodate" }
   | { status: "error"; message: string };
+
+/**
+ * Minimum gap between automatic checks. Rapid relaunches (or the periodic timer
+ * firing) within this window reuse the last result rather than hitting the
+ * release endpoint again. User-initiated checks bypass this.
+ */
+export const MIN_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * How often a long-running window re-checks for updates, so an always-open app
+ * eventually notices a release without needing a relaunch.
+ */
+export const PERIODIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+/** localStorage key holding the epoch-ms of the last automatic check attempt. */
+const LAST_CHECKED_KEY = "bugyo-update-last-checked";
 
 /** Download progress while installing an update. */
 export interface UpdateProgress {
@@ -67,6 +84,55 @@ export async function checkForUpdate(): Promise<UpdateCheck> {
   }
 }
 
+/** Read the last automatic-check timestamp (epoch ms), or null if never/unavailable. */
+export function getLastCheckedAt(): number | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_CHECKED_KEY);
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record when an automatic check was attempted. Never throws. */
+export function setLastCheckedAt(when: number): void {
+  try {
+    window.localStorage.setItem(LAST_CHECKED_KEY, String(when));
+  } catch {
+    /* storage may be unavailable in sandboxed contexts */
+  }
+}
+
+/**
+ * Pure throttle decision: should an automatic check run now given when one last
+ * ran? A missing/invalid last-checked time always allows a check.
+ */
+export function shouldCheckNow(
+  lastCheckedAt: number | null,
+  now: number,
+  minIntervalMs: number = MIN_CHECK_INTERVAL_MS,
+): boolean {
+  if (lastCheckedAt == null || !Number.isFinite(lastCheckedAt)) return true;
+  return now - lastCheckedAt >= minIntervalMs;
+}
+
+/** Result of a throttled check: the underlying check, or skipped by the throttle. */
+export type ScheduledCheck = UpdateCheck | { status: "skipped" };
+
+/**
+ * Automatic check that respects the cross-launch throttle. When it does run, it
+ * records the attempt time first so a concurrent/rapid relaunch won't also fire.
+ */
+export async function runScheduledCheck(
+  now: number = Date.now(),
+): Promise<ScheduledCheck> {
+  if (!shouldCheckNow(getLastCheckedAt(), now)) return { status: "skipped" };
+  setLastCheckedAt(now);
+  return checkForUpdate();
+}
+
 /**
  * Download and install an available update, reporting cumulative progress.
  * Does not relaunch — call {@link restartApp} afterwards.
@@ -97,6 +163,19 @@ export async function installUpdate(
 /** Relaunch the app so the freshly installed version takes over. */
 export function restartApp(): Promise<void> {
   return relaunch();
+}
+
+/**
+ * The running app's version (from `tauri.conf.json`), for display so users can
+ * report which build they're on. Never throws: resolves to `null` outside a
+ * Tauri window (e.g. in tests or a plain browser preview).
+ */
+export async function getAppVersion(): Promise<string | null> {
+  try {
+    return await getVersion();
+  } catch {
+    return null;
+  }
 }
 
 function errorMessage(err: unknown): string {

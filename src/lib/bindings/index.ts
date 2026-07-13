@@ -124,13 +124,7 @@ export interface CheckResult {
   stderr: string;
 }
 
-export type ReviewStage =
-  | "active"
-  | "needsReview"
-  | "checksFailed"
-  | "readyToLand"
-  | "pullRequestOpen"
-  | "merged";
+export type ReviewStage = "active" | "needsReview" | "readyToLand" | "pushed";
 
 /** Durable summary of the latest check against an exact workspace revision. */
 export interface ReviewCheck {
@@ -148,13 +142,6 @@ export interface WorkspaceReviewState {
   hasUncommittedChanges: boolean;
   changedFiles: string[];
   lastCheck: ReviewCheck | null;
-  pullRequestUrl: string | null;
-}
-
-/** Mirrors `workspace::MergePreview` — non-mutating pre-merge conflict check. */
-export interface MergePreview {
-  clean: boolean;
-  conflictedFiles: string[];
 }
 
 /** Mirrors `acp::SessionStatus`. */

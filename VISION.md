@@ -180,10 +180,12 @@ Landing work is a first-class flow, not an afterthought (the Conductor pattern).
 
 - **Diff review** per workspace: see exactly what the agent changed in its
   worktree before anything touches the base branch.
-- **Checks**: run the workspace's run/test script and surface pass/fail inline;
-  a `needs-review` status gates merge on green checks.
-- **Merge / pull request**: merge the workspace branch, or open a PR via the
-  platform CLI (`gh` / `glab`), directly from the app.
+- **Checks**: run the workspace's run/test script and surface pass/fail inline
+  as informational evidence — the agent verifies its own work; checks never gate
+  landing.
+- **Commit & push**: commit the reviewed changes, then push the branch to
+  `origin` directly from the app. kiro is git-only — no local merge, no PR/MR via
+  a platform CLI (`gh` / `glab`).
 - **Archive**: retire a finished or abandoned workspace and clean up its worktree.
 - Destructive git actions (force-push, hard reset, branch deletion) always
   require an explicit owner decision.
@@ -242,7 +244,7 @@ Surface Bugyo's `~/.kiro/bugyo/` state as live, structured UI.
 │     (session/new, session/prompt, session/cancel, session/update,  │
 │      permission requests)                                          │
 │   • Workspace manager: git worktree/branch create, setup/run       │
-│     scripts, diff, merge/PR (gh/glab), archive                     │
+│     scripts, diff, commit/push (git-only), archive                 │
 │   • Dispatch/queue engine + in-app heartbeat scheduler             │
 │   • Status/idle detection from ACP session events                  │
 │   • State store under ~/.kiro/bugyo (projects, sessions, queue)     │

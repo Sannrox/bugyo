@@ -50,7 +50,8 @@ Always run git with `-C <path>` (or set `current_dir`) rather than `cd`. Prefer
 - Bind the workspace's ACP session `cwd` to `worktree_path` (see `acp-notes.md`).
 - **Review**: `diff <base>..<branch>` feeds the diff UI; the **run/check script**
   executes in `worktree_path`; `status --porcelain` drives the dirty indicator.
-- **Merge/PR**: `git merge --no-ff`, or open a PR via `gh`/`glab` from the base.
+- **Push**: `git push -u origin <branch>` — kiro is git-only, so landing means
+  pushing the reviewed branch to `origin` (no local merge, no `gh`/`glab` PR/MR).
 - **Archive**: `worktree remove` (confirm `--force` if dirty) → `branch -d`
   (never silent `-D`).
 - Treat `worktree remove --force`, `branch -D`, hard reset, and force-push as

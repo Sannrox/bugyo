@@ -19,18 +19,14 @@ vi.mock("./lib/ipc", () => ({
   })),
   workspaceCommit: vi.fn(async () => {}),
   workspaceDiff: vi.fn(async () => ""),
-  workspaceMerge: vi.fn(async () => {}),
-  workspaceMergePreview: vi.fn(),
-  workspaceOpenPr: vi.fn(async () => "https://example.test/pr/1"),
+  workspacePush: vi.fn(async () => {}),
   workspaceReviewState: vi.fn(),
 }));
 
 import ReviewPanel from "./ReviewPanel";
 import {
   workspaceCommit,
-  workspaceMerge,
-  workspaceMergePreview,
-  workspaceOpenPr,
+  workspacePush,
   workspaceReviewState,
 } from "./lib/ipc";
 import { useFleet } from "./lib/fleetStore";
@@ -55,25 +51,19 @@ function review(
             changeFingerprint: "abc",
           }
         : null,
-    pullRequestUrl: null,
     ...overrides,
   };
 }
 
-describe("ReviewPanel — durable delivery workflow", () => {
+describe("ReviewPanel — git-only push workflow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(workspaceReviewState).mockReset();
-    vi.mocked(workspaceMergePreview).mockReset();
     useFleet.setState({ projects: [], sessions: {}, order: [], panel: null });
   });
 
   it("links directly to check configuration when a project has no check command", async () => {
     vi.mocked(workspaceReviewState).mockResolvedValue(review("needsReview"));
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
 
     render(<ReviewPanel sessionId="s1" />);
     const configure = await screen.findByRole("button", {
@@ -119,10 +109,6 @@ describe("ReviewPanel — durable delivery workflow", () => {
     vi.mocked(workspaceReviewState)
       .mockResolvedValueOnce(review("needsReview"))
       .mockResolvedValueOnce(review("readyToLand"));
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
 
     render(<ReviewPanel sessionId="s1" />);
     fireEvent.click(await screen.findByRole("button", { name: /run checks/i }));
@@ -133,23 +119,9 @@ describe("ReviewPanel — durable delivery workflow", () => {
     );
   });
 
-  it("warns about predicted conflicts and blocks merge", async () => {
-    vi.mocked(workspaceReviewState).mockResolvedValue(review("readyToLand"));
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: false,
-      conflictedFiles: ["src/main.rs", "README.md"],
-    });
-
-    render(<ReviewPanel sessionId="s1" />);
-
-    await screen.findByText(/merge conflict predicted/i);
-    expect(screen.getAllByText("src/main.rs")).toHaveLength(2);
-    expect(screen.getByText("README.md")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^merge$/i })).toBeDisabled();
-    expect(workspaceMerge).not.toHaveBeenCalled();
-  });
-
-  it("refreshes durable review state and enables merge after checks pass", async () => {
+  it("surfaces a recorded check as evidence and enables push once ready to land", async () => {
+    // A recorded check is informational only: while the workspace still needs
+    // review, push stays blocked on commit state, not on checks.
     vi.mocked(workspaceReviewState)
       .mockResolvedValueOnce(
         review("needsReview", {
@@ -158,83 +130,68 @@ describe("ReviewPanel — durable delivery workflow", () => {
             success: true,
             exitCode: 0,
             completedAt: "2026-07-10T12:00:00Z",
-            changeFingerprint: "stale",
+            changeFingerprint: "abc",
           },
         }),
       )
       .mockResolvedValueOnce(review("readyToLand"))
-      .mockResolvedValueOnce(review("merged", { hasChanges: false }));
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
+      .mockResolvedValueOnce(review("pushed", { hasChanges: false }));
 
     render(<ReviewPanel sessionId="s1" />);
     const evidence = await screen.findByLabelText("verification evidence");
-    expect(
-      within(evidence).getByText(/verification is outdated/i),
-    ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /rerun/i }));
+    expect(within(evidence).getByText(/checks passed/i)).toBeVisible();
+    // Not ready to land yet: push is gated on commit state, not the check.
+    expect(screen.getByRole("button", { name: /^push$/i })).toBeDisabled();
 
-    await waitFor(() =>
-      expect(
-        within(screen.getByLabelText("verification evidence")).getByText(
-          /checks passed/i,
-        ),
-      ).toBeVisible(),
-    );
-    const merge = screen.getByRole("button", { name: /^merge$/i });
-    expect(merge).toBeEnabled();
-    fireEvent.click(merge);
+    // Refreshing observes the committed, ready-to-land state.
+    fireEvent.click(screen.getByRole("button", { name: /refresh review/i }));
 
-    await waitFor(() => expect(workspaceMerge).toHaveBeenCalledWith("s1"));
+    const push = await screen.findByRole("button", { name: /^push$/i });
+    await waitFor(() => expect(push).toBeEnabled());
+    fireEvent.click(push);
+
+    await waitFor(() => expect(workspacePush).toHaveBeenCalledWith("s1"));
   });
 
-  it("fails closed when the final pre-merge check throws", async () => {
+  it("surfaces a push failure without recording a landing", async () => {
     vi.mocked(workspaceReviewState).mockResolvedValue(review("readyToLand"));
-    vi.mocked(workspaceMergePreview)
-      .mockResolvedValueOnce({ clean: true, conflictedFiles: [] })
-      .mockRejectedValueOnce(new Error("git failed"));
+    vi.mocked(workspacePush).mockRejectedValueOnce(
+      new Error("git push failed"),
+    );
 
     render(<ReviewPanel sessionId="s1" />);
-    const merge = await screen.findByRole("button", { name: /^merge$/i });
-    await waitFor(() => expect(merge).toBeEnabled());
-    fireEvent.click(merge);
+    const push = await screen.findByRole("button", { name: /^push$/i });
+    await waitFor(() => expect(push).toBeEnabled());
+    fireEvent.click(push);
 
-    await screen.findByText(/git failed/i);
-    expect(workspaceMerge).not.toHaveBeenCalled();
+    await screen.findByText(/git push failed/i);
   });
 
-  it("does not offer landing while the workspace has uncommitted changes", async () => {
+  it("offers commit (not push) while the workspace has uncommitted changes", async () => {
     vi.mocked(workspaceReviewState).mockResolvedValue(
       review("needsReview", { hasUncommittedChanges: true }),
     );
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
 
     render(<ReviewPanel sessionId="s1" />);
 
-    await screen.findByText(/commit outstanding changes/i);
+    // The push control is replaced by commit until changes are committed, but
+    // committing itself is never gated on verification — the human decides.
+    await screen.findByText(/commit the reviewed changes/i);
     expect(
       screen.getByRole("button", { name: /commit changes/i }),
-    ).toBeDisabled();
-    expect(screen.queryByRole("button", { name: /^merge$/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /open pr/i })).toBeNull();
-    expect(workspaceOpenPr).not.toHaveBeenCalled();
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /^push$/i })).toBeNull();
+    expect(workspacePush).not.toHaveBeenCalled();
   });
 
-  it("lets the human commit only after verification passes", async () => {
+  it("lets the human commit without any verification", async () => {
+    // No check has ever run (lastCheck: null) and no check command is
+    // configured — the commit button is still enabled.
     vi.mocked(workspaceReviewState)
       .mockResolvedValueOnce(
-        review("readyToLand", { hasUncommittedChanges: true }),
+        review("needsReview", { hasUncommittedChanges: true }),
       )
       .mockResolvedValueOnce(review("readyToLand"));
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
 
     render(<ReviewPanel sessionId="s1" />);
 
@@ -253,20 +210,15 @@ describe("ReviewPanel — durable delivery workflow", () => {
     await screen.findByText(/reviewed changes committed/i);
   });
 
-  it("replaces landing controls with cleanup after a merge", async () => {
+  it("replaces the push control with cleanup after a push", async () => {
     vi.mocked(workspaceReviewState).mockResolvedValue(
-      review("merged", { hasChanges: false }),
+      review("pushed", { hasChanges: false }),
     );
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
 
     render(<ReviewPanel sessionId="s1" />);
 
-    await screen.findByText(/merged into the base branch/i);
-    expect(screen.queryByRole("button", { name: /^merge$/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /open pr/i })).toBeNull();
+    await screen.findByText(/pushed to origin/i);
+    expect(screen.queryByRole("button", { name: /^push$/i })).toBeNull();
     expect(
       screen.getByRole("button", { name: /archive workspace/i }),
     ).toBeEnabled();
@@ -281,12 +233,8 @@ describe("ReviewPanel — durable delivery workflow", () => {
       }),
     );
     vi.mocked(workspaceReviewState).mockResolvedValue(
-      review("merged", { hasChanges: false }),
+      review("pushed", { hasChanges: false }),
     );
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
     render(<ReviewPanel sessionId="s1" />);
     const archive = await screen.findByRole("button", {
       name: /archive workspace/i,
@@ -300,25 +248,5 @@ describe("ReviewPanel — durable delivery workflow", () => {
 
     resolveConfirm(false);
     await waitFor(() => expect(archive).toBeEnabled());
-  });
-
-  it("shows the pull-request outcome instead of disabled landing controls", async () => {
-    vi.mocked(workspaceReviewState).mockResolvedValue(
-      review("pullRequestOpen", {
-        pullRequestUrl: "https://example.test/pr/1",
-      }),
-    );
-    vi.mocked(workspaceMergePreview).mockResolvedValue({
-      clean: true,
-      conflictedFiles: [],
-    });
-
-    render(<ReviewPanel sessionId="s1" />);
-
-    await screen.findByText(/pull request opened/i);
-    expect(screen.queryByRole("button", { name: /open pr/i })).toBeNull();
-    expect(
-      screen.getByRole("button", { name: /archive workspace/i }),
-    ).toBeEnabled();
   });
 });

@@ -2,12 +2,7 @@ import type { WorkspaceReviewState } from "./bindings";
 import type { SessionState } from "./session";
 
 export type DisplayStatus =
-  | SessionState["status"]
-  | "needsReview"
-  | "checksFailed"
-  | "readyToLand"
-  | "pullRequestOpen"
-  | "merged";
+  SessionState["status"] | "needsReview" | "readyToLand" | "pushed";
 
 export const DISPLAY_STATUS_LABEL: Record<DisplayStatus, string> = {
   disconnected: "Disconnected",
@@ -16,10 +11,8 @@ export const DISPLAY_STATUS_LABEL: Record<DisplayStatus, string> = {
   needsApproval: "Needs approval",
   error: "Error",
   needsReview: "Needs review",
-  checksFailed: "Checks failed",
   readyToLand: "Ready to land",
-  pullRequestOpen: "PR open",
-  merged: "Merged",
+  pushed: "Pushed",
 };
 
 /**
@@ -35,10 +28,8 @@ export function effectiveStatus(
   }
   switch (review?.stage) {
     case "needsReview":
-    case "checksFailed":
     case "readyToLand":
-    case "pullRequestOpen":
-    case "merged":
+    case "pushed":
       return review.stage;
     default:
       return agent;

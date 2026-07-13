@@ -21,7 +21,6 @@ import type {
   BudgetConfig,
   CheckResult,
   HeartbeatReport,
-  MergePreview,
   PingResponse,
   Project,
   QueueUpdate,
@@ -123,27 +122,9 @@ export function workspaceCommit(
   return invoke<void>("workspace_commit", { sessionId, message });
 }
 
-/** Merge the workspace branch into the base repo's current branch. */
-export function workspaceMerge(sessionId: string): Promise<void> {
-  return invoke<void>("workspace_merge", { sessionId });
-}
-
-/** Non-mutating pre-merge check: whether the merge is clean + conflicted files. */
-export function workspaceMergePreview(
-  sessionId: string,
-): Promise<MergePreview> {
-  return invoke<MergePreview>("workspace_merge_preview", { sessionId });
-}
-
-/** Push the branch and open a PR/MR; returns the URL. */
-export function workspaceOpenPr(
-  sessionId: string,
-  title?: string,
-): Promise<string> {
-  return invoke<string>("workspace_open_pr", {
-    sessionId,
-    title: title ?? null,
-  });
+/** Push the workspace's committed branch to `origin` (`git push -u`). */
+export function workspacePush(sessionId: string): Promise<void> {
+  return invoke<void>("workspace_push", { sessionId });
 }
 
 /** List active sessions (id + optional workspace) for reconciling the fleet. */

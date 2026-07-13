@@ -36,7 +36,6 @@ export default function StatusBar() {
             stopped += 1;
             break;
           case "needsReview":
-          case "checksFailed":
           case "readyToLand":
             review += 1;
             break;
