@@ -28,8 +28,9 @@ export type UpdateCheck =
 
 /**
  * Minimum gap between automatic checks. Rapid relaunches (or the periodic timer
- * firing) within this window reuse the last result rather than hitting the
- * release endpoint again. User-initiated checks bypass this.
+ * firing) within this window skip redundant checks unless the last result found
+ * an update, which must be revalidated to obtain a live install handle.
+ * User-initiated checks bypass this.
  */
 export const MIN_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -41,6 +42,8 @@ export const PERIODIC_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 /** localStorage key holding the epoch-ms of the last automatic check attempt. */
 const LAST_CHECKED_KEY = "bugyo-update-last-checked";
+/** Whether the most recent successful check found an available update. */
+const LAST_FOUND_UPDATE_KEY = "bugyo-update-last-found-update";
 
 /** Download progress while installing an update. */
 export interface UpdateProgress {
@@ -77,10 +80,30 @@ export function describeUpdate(update: UpdateLike): AvailableUpdate {
 export async function checkForUpdate(): Promise<UpdateCheck> {
   try {
     const update = await check();
-    if (!update) return { status: "uptodate" };
+    if (!update) {
+      setLastCheckFoundUpdate(false);
+      return { status: "uptodate" };
+    }
+    setLastCheckFoundUpdate(true);
     return { status: "available", update, info: describeUpdate(update) };
   } catch (err) {
     return { status: "error", message: errorMessage(err) };
+  }
+}
+
+function lastCheckFoundUpdate(): boolean {
+  try {
+    return window.localStorage.getItem(LAST_FOUND_UPDATE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function setLastCheckFoundUpdate(found: boolean): void {
+  try {
+    window.localStorage.setItem(LAST_FOUND_UPDATE_KEY, String(found));
+  } catch {
+    /* storage may be unavailable in sandboxed contexts */
   }
 }
 
@@ -122,13 +145,17 @@ export function shouldCheckNow(
 export type ScheduledCheck = UpdateCheck | { status: "skipped" };
 
 /**
- * Automatic check that respects the cross-launch throttle. When it does run, it
- * records the attempt time first so a concurrent/rapid relaunch won't also fire.
+ * Automatic check that respects the cross-launch throttle. A known available
+ * update bypasses the throttle because the plugin's install handle cannot be
+ * persisted across launches and must be reacquired. When a check runs, it
+ * records the attempt time first so concurrent windows do not duplicate it.
  */
 export async function runScheduledCheck(
   now: number = Date.now(),
 ): Promise<ScheduledCheck> {
-  if (!shouldCheckNow(getLastCheckedAt(), now)) return { status: "skipped" };
+  if (!lastCheckFoundUpdate() && !shouldCheckNow(getLastCheckedAt(), now)) {
+    return { status: "skipped" };
+  }
   setLastCheckedAt(now);
   return checkForUpdate();
 }

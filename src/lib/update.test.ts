@@ -144,6 +144,18 @@ describe("runScheduledCheck", () => {
     expect(check).not.toHaveBeenCalled();
     expect(getLastCheckedAt()).toBe(last);
   });
+
+  it("rechecks a known available update inside the throttle window", async () => {
+    const update = { version: "0.2.0", currentVersion: "0.1.0" };
+    check.mockResolvedValue(update);
+    const first = 5_000_000;
+
+    expect((await runScheduledCheck(first)).status).toBe("available");
+    expect(
+      (await runScheduledCheck(first + MIN_CHECK_INTERVAL_MS - 1)).status,
+    ).toBe("available");
+    expect(check).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("installUpdate", () => {
