@@ -20,10 +20,8 @@ const DOT_CLASS: Record<DisplayStatus, string> = {
   needsApproval: "dot--needsApproval",
   error: "dot--error",
   needsReview: "dot--needsReview",
-  checksFailed: "dot--checksFailed",
   readyToLand: "dot--readyToLand",
-  pullRequestOpen: "dot--pullRequestOpen",
-  merged: "dot--merged",
+  pushed: "dot--pushed",
 };
 
 /** Most recent agent message text, for the card snippet. */
@@ -292,7 +290,6 @@ export default function FleetGrid() {
     if (
       statusFilter === "review" &&
       status !== "needsReview" &&
-      status !== "checksFailed" &&
       status !== "readyToLand"
     ) {
       return false;
@@ -304,11 +301,7 @@ export default function FleetGrid() {
     ) {
       return false;
     }
-    if (
-      statusFilter === "landed" &&
-      status !== "pullRequestOpen" &&
-      status !== "merged"
-    ) {
+    if (statusFilter === "landed" && status !== "pushed") {
       return false;
     }
     const needle = query.trim().toLowerCase();
@@ -347,11 +340,7 @@ export default function FleetGrid() {
       sessions[id]?.state.status ?? "disconnected",
       sessions[id]?.review ?? null,
     );
-    return (
-      status === "needsReview" ||
-      status === "checksFailed" ||
-      status === "readyToLand"
-    );
+    return status === "needsReview" || status === "readyToLand";
   }).length;
   const groups = visibleOrder.reduce<
     Array<{ key: string; label: string; ids: string[] }>

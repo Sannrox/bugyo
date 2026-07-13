@@ -285,11 +285,21 @@ Sessions **persist and can be resumed** across process restarts:
   <-- {"jsonrpc":"2.0","id":2,"result":{"modes":{...},"models":{...}}}  // same shape as session/new
   ```
 - **Locking caveat:** each active session holds `~/.kiro/sessions/cli/<id>.lock`
-  = `{"pid":N,"started_at":"..."}`. A hard-killed process (our `kill_on_drop`)
-  leaves a **stale lock**, and `session/load` then fails with
+  = `{"pid":N,"started_at":"..."}`. A hard-killed process (a bare `kill_on_drop`
+  SIGKILL) leaves a **stale lock**, and `session/load` then fails with
   `"Session is active in another process (PID N)"`. Resume works once the stale
   lock is cleared — remove `<id>.lock` when its `pid` is not alive (safe), or
   shut the agent down gracefully so it removes its own lock.
+- **How Bugyo handles it** (see [`AcpClient::shutdown`](../src-tauri/src/acp/client.rs)
+  - `ensure_client`/`release_client` in [`service.rs`](../src-tauri/src/service.rs)):
+    releasing an idle session sends **SIGTERM and waits** for a clean exit (falling
+    back to SIGKILL after a grace period) so kiro-cli removes its own lock instead
+    of leaving a stale one. On resume, [`reclaim_stale_lock`](../src-tauri/src/acp/mod.rs)
+    deletes the lock only if its `pid` is dead, and `ensure_client` **retries the
+    reclaim + `session/load`** a few times: this closes the race where a
+    just-released (or crashed) process is still exiting and momentarily keeps the
+    lock alive. A truly orphaned live process (e.g. a hard app crash) still needs a
+    manual quit/kill — we never SIGKILL an unknown PID out from under the lock.
 
 ## Image prompts (screenshots) — VERIFIED (`docs/spikes/acp_image_probe.py`)
 

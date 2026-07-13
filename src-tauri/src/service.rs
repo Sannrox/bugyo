@@ -49,6 +49,21 @@ pub const AUTOMATION_SECS: u64 = 30;
 /// honoured). Detection is token-free, so this can be brisk.
 pub const TRIGGER_SECS: u64 = 30;
 
+/// How many times `ensure_client` retries the reclaim + `session/load` when the
+/// session's lock is still held by an exiting process (see the retry loop for
+/// why). Small: the common cause is a released process finishing its teardown.
+const LOAD_ATTEMPTS: usize = 5;
+/// Delay between resume retries while waiting for a stale lock owner to exit.
+const LOAD_RETRY_DELAY: Duration = Duration::from_millis(300);
+
+/// Whether an agent error from `session/load` is kiro-cli's session-lock
+/// collision ("Session is active in another process (PID N)"), i.e. the lock is
+/// held by a still-alive process. Retryable: it typically clears once that
+/// process finishes exiting and `reclaim_stale_lock` removes the dead lock.
+fn is_session_locked(err: &str) -> bool {
+    err.contains("active in another process")
+}
+
 struct TauriEventSink {
     app: AppHandle,
     /// Shared with [`Inner::spent`]; accumulates per-session credit spend.
@@ -255,42 +270,75 @@ impl AcpManager {
             (entry.args.clone(), entry.repo.clone())
         };
 
-        // Reclaim a stale lock from a prior (killed) process, then resume.
-        crate::acp::reclaim_stale_lock(session_id);
         let app = self
             .inner
             .app
             .get()
             .ok_or("app handle not initialised")?
             .clone();
-        let sink: Arc<dyn EventSink> = Arc::new(TauriEventSink {
-            app,
-            spent: self.inner.spent.clone(),
-        });
-        let resume_sink = Arc::new(ResumeEventSink::new(sink));
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let program = crate::acp::resolve_kiro_cli();
-        let client =
-            AcpClient::spawn(program, &arg_refs, resume_sink.clone()).map_err(|e| e.to_string())?;
-        client.initialize().await.map_err(|e| e.to_string())?;
-        client
-            .load_session(session_id, &cwd)
-            .await
-            .map_err(|e| e.to_string())?;
-        resume_sink.finish_replay();
-        let client = Arc::new(client);
 
-        let mut guard = self.inner.sessions.lock().await;
-        if let Some(entry) = guard.get_mut(session_id) {
-            entry.client = Some(client.clone());
+        // Resume can race a just-released (or crashed) session whose previous
+        // process is still exiting: for a brief window it keeps kiro-cli's
+        // `.lock`, so `session/load` fails with "active in another process".
+        // `reclaim_stale_lock` clears the lock as soon as that PID dies, so
+        // retry the reclaim+load a few times before giving up rather than
+        // surfacing a transient lock collision as a hard error.
+        let mut last_err = String::new();
+        for attempt in 0..LOAD_ATTEMPTS {
+            // Reclaim a stale lock from a prior (killed) process, then resume.
+            crate::acp::reclaim_stale_lock(session_id);
+            let sink: Arc<dyn EventSink> = Arc::new(TauriEventSink {
+                app: app.clone(),
+                spent: self.inner.spent.clone(),
+            });
+            let resume_sink = Arc::new(ResumeEventSink::new(sink));
+            let client = AcpClient::spawn(program, &arg_refs, resume_sink.clone())
+                .map_err(|e| e.to_string())?;
+            client.initialize().await.map_err(|e| e.to_string())?;
+            match client.load_session(session_id, &cwd).await {
+                Ok(()) => {
+                    resume_sink.finish_replay();
+                    let client = Arc::new(client);
+                    let mut guard = self.inner.sessions.lock().await;
+                    if let Some(entry) = guard.get_mut(session_id) {
+                        entry.client = Some(client.clone());
+                    }
+                    return Ok(client);
+                }
+                Err(e) => {
+                    // This just-spawned process never loaded the session, so it
+                    // holds no lock; drop it (kill_on_drop) so we don't leak a
+                    // kiro-cli per retry. Then wait for the lock owner to finish
+                    // exiting and try again.
+                    drop(client);
+                    last_err = e.to_string();
+                    if attempt + 1 < LOAD_ATTEMPTS && is_session_locked(&last_err) {
+                        tokio::time::sleep(LOAD_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            }
         }
-        Ok(client)
+        Err(last_err)
     }
 
     /// Release a session's process when it goes idle (frees the kiro lock).
+    /// Gracefully shuts the agent down (SIGTERM → wait → SIGKILL) so it removes
+    /// its own session lock, instead of leaving a stale one for the next resume
+    /// to reclaim. The client is taken out of the map before the (awaited)
+    /// shutdown so the sessions lock isn't held across it.
     async fn release_client(&self, session_id: &str) {
-        if let Some(entry) = self.inner.sessions.lock().await.get_mut(session_id) {
-            entry.client = None;
+        let client = {
+            let mut guard = self.inner.sessions.lock().await;
+            guard
+                .get_mut(session_id)
+                .and_then(|entry| entry.client.take())
+        };
+        if let Some(client) = client {
+            client.shutdown().await;
         }
     }
 
@@ -2288,110 +2336,43 @@ pub async fn workspace_commit(
     Ok(())
 }
 
-/// Merge the workspace's branch into the base repo's current branch (--no-ff).
+/// Push the workspace's committed branch to `origin` (`git push -u`). kiro's
+/// git-only way to land work: no local merge, no `gh`/`glab` PR/MR.
 #[tauri::command]
-pub async fn workspace_merge(
+pub async fn workspace_push(
     manager: State<'_, AcpManager>,
     session_id: String,
 ) -> Result<(), String> {
     let ws = manager.workspace_of(&session_id).await?;
     let review_record = manager.review_record_of(&session_id).await?;
     let branch = ws.branch.clone();
-    let msg = format!("merge {branch}");
     tokio::task::spawn_blocking(move || {
         let review_state =
             workspace::review_state(&ws, &review_record).map_err(|error| error.to_string())?;
         if review_state.stage != workspace::ReviewStage::ReadyToLand {
             return Err(
-                "workspace is not ready to land; run checks against the current changes first"
-                    .to_string(),
+                "workspace is not ready to land; commit your reviewed changes first".to_string(),
             );
         }
         if workspace::is_dirty(PathBuf::from(&ws.worktree_path).as_path())
             .map_err(|e| e.to_string())?
         {
             return Err(
-                "workspace has uncommitted changes; commit them before merging".to_string(),
+                "workspace has uncommitted changes; commit them before pushing".to_string(),
             );
         }
-        workspace::merge(
-            PathBuf::from(&ws.repo_root).as_path(),
-            &ws.base_branch,
-            &ws.branch,
-        )
-        .map_err(|e| e.to_string())
+        workspace::push(PathBuf::from(&ws.repo_root).as_path(), &ws.branch)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;
     let mut review = manager.review_record_of(&session_id).await?;
-    review.landing = Some(workspace::LandingState::Merged);
-    manager.save_review_record(&session_id, review).await?;
-    let _ = state::append_log(&state::orch_home(), &msg);
-    Ok(())
-}
-
-/// Non-mutating pre-merge check: would merging this workspace's branch into its
-/// base be clean, and which files would conflict? (Uses `git merge-tree`.)
-#[tauri::command]
-pub async fn workspace_merge_preview(
-    manager: State<'_, AcpManager>,
-    session_id: String,
-) -> Result<workspace::MergePreview, String> {
-    let ws = manager.workspace_of(&session_id).await?;
-    tokio::task::spawn_blocking(move || {
-        workspace::merge_preview(
-            PathBuf::from(&ws.repo_root).as_path(),
-            &ws.base_branch,
-            &ws.branch,
-        )
-        .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Push the workspace branch and open a PR/MR via `gh`/`glab`. Returns the URL.
-#[tauri::command]
-pub async fn workspace_open_pr(
-    manager: State<'_, AcpManager>,
-    session_id: String,
-    title: Option<String>,
-) -> Result<String, String> {
-    let ws = manager.workspace_of(&session_id).await?;
-    let review_record = manager.review_record_of(&session_id).await?;
-    let url = tokio::task::spawn_blocking(move || {
-        let review_state =
-            workspace::review_state(&ws, &review_record).map_err(|error| error.to_string())?;
-        if review_state.stage != workspace::ReviewStage::ReadyToLand {
-            return Err(
-                "workspace is not ready to land; run checks against the current changes first"
-                    .to_string(),
-            );
-        }
-        if workspace::is_dirty(PathBuf::from(&ws.worktree_path).as_path())
-            .map_err(|e| e.to_string())?
-        {
-            return Err(
-                "workspace has uncommitted changes; commit them before opening a pull request"
-                    .to_string(),
-            );
-        }
-        workspace::open_pr(
-            PathBuf::from(&ws.repo_root).as_path(),
-            &ws.branch,
-            title.as_deref(),
-        )
-        .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let mut review = manager.review_record_of(&session_id).await?;
-    review.landing = Some(workspace::LandingState::PullRequest { url: url.clone() });
+    review.landing = Some(workspace::LandingState::Pushed);
     manager.save_review_record(&session_id, review).await?;
     manager
-        .log(&format!("pull request -> {session_id}: {url}"))
+        .log(&format!("push -> {session_id}: {branch}"))
         .await;
-    Ok(url)
+    Ok(())
 }
 
 /// Spawn the in-app heartbeat: a periodic pass that drains queued work to idle

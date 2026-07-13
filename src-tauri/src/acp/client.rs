@@ -30,6 +30,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// healthy long-running turn that keeps streaming (or is paused awaiting a
 /// human decision) never times out; only a genuinely stalled agent does.
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
+/// Grace period granted to the agent process to exit cleanly after a SIGTERM
+/// before we escalate to SIGKILL. A clean exit lets kiro-cli remove its own
+/// session `.lock`; the lock is what a subsequent resume trips over
+/// ("Session is active in another process") if the process is still alive.
+const GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(3);
 
 /// A live ACP client connected to one agent process/transport.
 pub struct AcpClient {
@@ -285,6 +290,39 @@ impl AcpClient {
             .and_then(Value::as_str)
             .unwrap_or("end_turn")
             .to_string())
+    }
+
+    /// Gracefully terminate the agent process, giving it a chance to remove its
+    /// own session `.lock` before we escalate. Sends SIGTERM and waits up to
+    /// [`GRACEFUL_SHUTDOWN`] for a clean exit, then reaps; if the process
+    /// overstays the window it is SIGKILLed (tokio [`Child::kill`]) and reaped.
+    ///
+    /// This replaces relying solely on `kill_on_drop` (a hard SIGKILL that
+    /// leaves a stale lock): a released session can then be resumed without
+    /// tripping kiro-cli's "active in another process" check. Idempotent — once
+    /// the child has been taken and reaped, further calls are a no-op.
+    pub async fn shutdown(&self) {
+        let mut child = match self.child.lock().expect("child mutex poisoned").take() {
+            Some(c) => c,
+            None => return,
+        };
+        // Ask the process to exit cleanly (SIGTERM) so it drops its lock.
+        // Shelling out to `kill` mirrors `reclaim_stale_lock` and avoids pulling
+        // in a `libc`/`nix` dependency for the one signal tokio's `Child` can't
+        // send itself (`kill()` is SIGKILL only).
+        if let Some(pid) = child.id() {
+            let _ = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+        }
+        // Reap on a clean exit; SIGKILL + reap if it overstays the grace period.
+        if tokio::time::timeout(GRACEFUL_SHUTDOWN, child.wait())
+            .await
+            .is_err()
+        {
+            let _ = child.kill().await;
+        }
     }
 
     /// Request cancellation of the current turn (notification; see protocol note).
@@ -1115,6 +1153,62 @@ mod tests {
             matches!(outcome, Err(AcpError::Timeout)),
             "expected Timeout on a silent stalled turn, got {outcome:?}"
         );
+    }
+
+    /// `shutdown()` must terminate the real child process (so it releases its
+    /// session lock) and reap it, promptly — well within the grace period, since
+    /// SIGTERM ends a cooperative process at once. Uses `sleep` as a stand-in
+    /// long-lived child: the reader loop sees immediate EOF, but the process
+    /// stays alive until we signal it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_terminates_and_reaps_child() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let client = AcpClient::spawn("sleep", &["30"], Arc::new(VecSink(events))).unwrap();
+
+        let pid = client
+            .child
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(Child::id)
+            .expect("spawned child should have a pid");
+        // Precondition: the process is alive (`kill -0` succeeds).
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success(),
+            "child should be alive before shutdown"
+        );
+
+        let start = std::time::Instant::now();
+        client.shutdown().await;
+        assert!(
+            start.elapsed() < GRACEFUL_SHUTDOWN,
+            "SIGTERM should end the child well before the SIGKILL escalation"
+        );
+
+        // The child is gone: `kill -0` now fails (no such process). Poll briefly
+        // to allow the signal delivery/reap to settle.
+        let mut dead = false;
+        for _ in 0..100 {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(dead, "child should be terminated after shutdown");
+
+        // Idempotent: the child was taken, so a second call is a no-op.
+        client.shutdown().await;
     }
 
     /// Live smoke test against the real agent. Ignored by default (requires

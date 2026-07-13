@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { Download, RefreshCw, X } from "lucide-react";
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
-  checkForUpdate,
   installUpdate,
   restartApp,
+  runScheduledCheck,
+  PERIODIC_CHECK_INTERVAL_MS,
   type AvailableUpdate,
   type UpdateProgress,
 } from "./lib/update";
@@ -13,9 +14,10 @@ type Phase = "prompt" | "downloading" | "installed" | "error";
 
 /**
  * A non-intrusive banner that appears only when a newer signed release is
- * available. It checks once on mount (silently ignoring failures/offline),
- * lets the user download+install in place, then offers to relaunch. Dismissing
- * hides it until the next launch.
+ * available. It checks shortly after mount and then periodically while the app
+ * stays open (both silently ignoring failures/offline and throttled across
+ * relaunches), lets the user download+install in place, then offers to relaunch.
+ * Dismissing hides it until a newer version appears or the next launch.
  */
 export default function UpdateBanner() {
   const [handle, setHandle] = useState<Update | null>(null);
@@ -27,15 +29,22 @@ export default function UpdateBanner() {
 
   useEffect(() => {
     let active = true;
-    void checkForUpdate().then((res) => {
-      if (!active) return;
-      if (res.status === "available") {
+    const run = () =>
+      void runScheduledCheck().then((res) => {
+        if (!active || res.status !== "available") return;
         setHandle(res.update);
-        setInfo(res.info);
-      }
-    });
+        setInfo((prev) => {
+          // A genuinely newer version supersedes a dismissed one.
+          if (prev && prev.version !== res.info.version) setDismissed(false);
+          return res.info;
+        });
+      });
+
+    run();
+    const timer = setInterval(run, PERIODIC_CHECK_INTERVAL_MS);
     return () => {
       active = false;
+      clearInterval(timer);
     };
   }, []);
 

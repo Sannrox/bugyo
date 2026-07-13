@@ -38,19 +38,13 @@ vi.mock("./lib/ipc", () => ({
     stderr: "",
   })),
   workspaceCommit: vi.fn(async () => {}),
-  workspaceMerge: vi.fn(async () => {}),
-  workspaceMergePreview: vi.fn(async () => ({
-    clean: true,
-    conflictedFiles: [],
-  })),
-  workspaceOpenPr: vi.fn(async () => "https://example/pr/1"),
+  workspacePush: vi.fn(async () => {}),
   workspaceReviewState: vi.fn(async () => ({
     stage: "needsReview",
     hasChanges: true,
     hasUncommittedChanges: false,
     changedFiles: ["src/main.rs"],
     lastCheck: null,
-    pullRequestUrl: null,
   })),
   acpCloseSession: vi.fn(async () => {}),
   acpDeleteSession: vi.fn(async () => {}),
@@ -278,7 +272,6 @@ describe("Fleet", () => {
         hasUncommittedChanges: false,
         changedFiles: ["src/main.rs"],
         lastCheck: null,
-        pullRequestUrl: null,
       })
       .mockResolvedValueOnce({
         stage: "readyToLand",
@@ -292,7 +285,6 @@ describe("Fleet", () => {
           completedAt: "2026-07-10T12:00:00Z",
           changeFingerprint: "abc",
         },
-        pullRequestUrl: null,
       });
 
     // Open the inspector without replacing the conversation or composer.
@@ -301,78 +293,30 @@ describe("Fleet", () => {
     expect(screen.getByLabelText("transcript")).toBeInTheDocument();
     expect(screen.getByLabelText("prompt")).toBeInTheDocument();
 
-    // Merge is disabled before checks pass.
-    const mergeBtn = screen.getByRole("button", { name: /^merge$/i });
-    expect(mergeBtn).toBeDisabled();
+    // Push is disabled until the changes are committed (ready to land) — this
+    // is gated on commit state, not on checks.
+    const pushBtn = screen.getByRole("button", { name: /^push$/i });
+    expect(pushBtn).toBeDisabled();
 
-    // A refresh observes the agent-produced green verification state.
+    // A refresh observes the committed, ready-to-land state (and the agent's
+    // own recorded check surfaces as informational evidence).
     fireEvent.click(screen.getByRole("button", { name: /refresh review/i }));
     await screen.findByText(/checks passed/i);
 
-    // Now merge is enabled.
+    // Now push is enabled.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^merge$/i })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: /^push$/i })).toBeEnabled(),
     );
   });
 
-  it("runs configured verification automatically when the agent finishes", async () => {
+  it("resolves review state when the agent finishes, without running or grading checks", async () => {
     render(<Fleet />);
     await waitFor(() => expect(h.handler).not.toBeNull());
 
     await createWorkspace("/repo1", "feat a");
     await screen.findByRole("button", { name: /feat-a/i });
-    const project = useFleet.getState().projects[0];
-    useFleet.getState().updateProject({
-      ...project,
-      checkScript: "cargo test",
-    });
-
-    const { workspaceCheck, workspaceReviewState } = await import("./lib/ipc");
-    vi.mocked(workspaceReviewState)
-      .mockReset()
-      .mockResolvedValueOnce({
-        stage: "needsReview",
-        hasChanges: true,
-        hasUncommittedChanges: true,
-        changedFiles: ["src/main.rs"],
-        lastCheck: null,
-        pullRequestUrl: null,
-      })
-      .mockResolvedValueOnce({
-        stage: "readyToLand",
-        hasChanges: true,
-        hasUncommittedChanges: true,
-        changedFiles: ["src/main.rs"],
-        lastCheck: {
-          script: "cargo test",
-          success: true,
-          exitCode: 0,
-          completedAt: "2026-07-10T12:00:00Z",
-          changeFingerprint: "abc",
-        },
-        pullRequestUrl: null,
-      });
-
-    act(() => {
-      h.handler!({ type: "status", sessionId: "sess-a", status: "idle" });
-    });
-
-    await waitFor(() =>
-      expect(workspaceCheck).toHaveBeenCalledWith("sess-a", "cargo test"),
-    );
-    await waitFor(() =>
-      expect(useFleet.getState().sessions["sess-a"].review?.stage).toBe(
-        "readyToLand",
-      ),
-    );
-  });
-
-  it("returns a failed automatic verification to the agent", async () => {
-    render(<Fleet />);
-    await waitFor(() => expect(h.handler).not.toBeNull());
-
-    await createWorkspace("/repo1", "feat a");
-    await screen.findByRole("button", { name: /feat-a/i });
+    // Even with a check command configured, the harness must not run it: the
+    // agent verifies its own work (its own tooling or a Kiro hook).
     const project = useFleet.getState().projects[0];
     useFleet.getState().updateProject({
       ...project,
@@ -381,49 +325,29 @@ describe("Fleet", () => {
 
     const { orchEnqueue, workspaceCheck, workspaceReviewState } =
       await import("./lib/ipc");
-    vi.mocked(workspaceCheck).mockResolvedValueOnce({
-      success: false,
-      exitCode: 101,
-      stdout: "",
-      stderr: "test failed: expected ready",
-    });
     vi.mocked(workspaceReviewState)
       .mockReset()
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         stage: "needsReview",
         hasChanges: true,
         hasUncommittedChanges: true,
         changedFiles: ["src/main.rs"],
         lastCheck: null,
-        pullRequestUrl: null,
-      })
-      .mockResolvedValueOnce({
-        stage: "needsReview",
-        hasChanges: true,
-        hasUncommittedChanges: true,
-        changedFiles: ["src/main.rs"],
-        lastCheck: {
-          script: "cargo test",
-          success: false,
-          exitCode: 101,
-          completedAt: "2026-07-10T12:00:00Z",
-          changeFingerprint: "abc",
-        },
-        pullRequestUrl: null,
       });
 
     act(() => {
       h.handler!({ type: "status", sessionId: "sess-a", status: "idle" });
     });
 
+    // The backend-owned lifecycle is resolved so the fleet shows "Needs review"...
     await waitFor(() =>
-      expect(orchEnqueue).toHaveBeenCalledWith(
-        "sess-a",
-        expect.stringMatching(
-          /cargo test[\s\S]*exit 101[\s\S]*expected ready/i,
-        ),
+      expect(useFleet.getState().sessions["sess-a"].review?.stage).toBe(
+        "needsReview",
       ),
     );
+    // ...but the harness neither runs the check nor nags the agent about it.
+    expect(workspaceCheck).not.toHaveBeenCalled();
+    expect(orchEnqueue).not.toHaveBeenCalled();
   });
 
   it("restores a resumed session's transcript from kiro", async () => {

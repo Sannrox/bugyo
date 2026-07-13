@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 import {
   Archive,
@@ -42,10 +43,8 @@ const DOT_CLASS: Record<DisplayStatus, string> = {
   needsApproval: "dot--needsApproval",
   error: "dot--error",
   needsReview: "dot--needsReview",
-  checksFailed: "dot--checksFailed",
   readyToLand: "dot--readyToLand",
-  pullRequestOpen: "dot--pullRequestOpen",
-  merged: "dot--merged",
+  pushed: "dot--pushed",
 };
 
 const NO_REPO = "(no repository)";
@@ -666,7 +665,12 @@ function SessionContextMenu({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  return (
+  // Rendered through a portal to document.body: the sidebar has a
+  // `backdrop-filter`, which makes it the containing block for fixed-positioned
+  // descendants and its own stacking context. Kept inside the sidebar, this
+  // fixed overlay would be clipped to the sidebar's width and painted behind the
+  // right-hand panel. Portalling escapes both traps.
+  return createPortal(
     <div
       className="ctxmenu__overlay"
       onClick={onClose}
@@ -754,6 +758,7 @@ function SessionContextMenu({
           </button>
         </li>
       </ul>
-    </div>
+    </div>,
+    document.body,
   );
 }

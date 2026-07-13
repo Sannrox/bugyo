@@ -9,20 +9,16 @@ function review(stage: ReviewStage): WorkspaceReviewState {
     hasUncommittedChanges: false,
     changedFiles: [],
     lastCheck: null,
-    pullRequestUrl: null,
   };
 }
 
 describe("effectiveStatus", () => {
-  it.each([
-    "needsReview",
-    "checksFailed",
-    "readyToLand",
-    "pullRequestOpen",
-    "merged",
-  ] as const)("shows the %s lifecycle when the agent is idle", (stage) => {
-    expect(effectiveStatus("idle", review(stage))).toBe(stage);
-  });
+  it.each(["needsReview", "readyToLand", "pushed"] as const)(
+    "shows the %s lifecycle when the agent is idle",
+    (stage) => {
+      expect(effectiveStatus("idle", review(stage))).toBe(stage);
+    },
+  );
 
   it("keeps active and urgent agent states above the review lifecycle", () => {
     const needsReview = review("needsReview");

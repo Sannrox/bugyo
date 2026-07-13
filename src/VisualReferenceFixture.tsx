@@ -31,7 +31,6 @@ const REVIEW: WorkspaceReviewState = {
     completedAt: "2026-07-11T12:00:00.000Z",
     changeFingerprint: "visual",
   },
-  pullRequestUrl: null,
 };
 
 const DIFF = `diff --git a/src/App.tsx b/src/App.tsx

@@ -12,8 +12,6 @@ import {
   projectList,
   setAttentionBadge,
   budgetGet,
-  orchEnqueue,
-  workspaceCheck,
   workspaceReviewState,
 } from "./lib/ipc";
 import { useFleet } from "./lib/fleetStore";
@@ -52,7 +50,6 @@ export default function Fleet() {
   const [hydrationVersion, setHydrationVersion] = useState(0);
   const [hydrationFailed, setHydrationFailed] = useState(false);
   const verifying = useRef(new Set<string>());
-  const autoFixAttempts = useRef(new Map<string, number>());
   // Mirror the attention count to the OS dock/taskbar badge.
   const attentionCount = useFleet(
     (s) =>
@@ -120,46 +117,19 @@ export default function Fleet() {
       }
     };
 
-    const verifyAfterTurn = async (sessionId: string) => {
+    // Resolve the backend-owned review lifecycle when a turn ends so the fleet
+    // shows "Needs review" / "Ready to land" without the user first opening the
+    // review panel. The harness deliberately does NOT run or grade checks: the
+    // agent verifies its own work (via its own tooling or a Kiro hook the user
+    // configures), and the human is the final gate in the review panel.
+    const resolveReviewAfterTurn = async (sessionId: string) => {
       if (verifying.current.has(sessionId)) return;
       verifying.current.add(sessionId);
       try {
         const review = await workspaceReviewState(sessionId);
         if (active) setReview(sessionId, review);
-        if (review.stage !== "needsReview" || !review.hasChanges) return;
-
-        const fleet = useFleet.getState();
-        const session = fleet.sessions[sessionId];
-        const script = fleet.projects.find(
-          (project) => project.path === session?.workspace?.repoRoot,
-        )?.checkScript;
-        if (!script?.trim()) return;
-
-        const result = await workspaceCheck(sessionId, script.trim());
-        const checked = await workspaceReviewState(sessionId);
-        if (active) setReview(sessionId, checked);
-        if (result.success) {
-          autoFixAttempts.current.delete(sessionId);
-          return;
-        }
-
-        const attempts = autoFixAttempts.current.get(sessionId) ?? 0;
-        if (attempts >= 2) {
-          void notify(
-            "Agent verification needs attention",
-            `Checks still fail for ${session?.workspace?.task || sessionId}.`,
-          );
-          return;
-        }
-        autoFixAttempts.current.set(sessionId, attempts + 1);
-        const output = `${result.stdout}\n${result.stderr}`.trim().slice(-6000);
-        await orchEnqueue(
-          sessionId,
-          `Bugyo ran the configured verification command:\n\n${script.trim()}\n\nIt failed with exit ${result.exitCode}. Fix the root cause, run the relevant checks yourself, and keep iterating until they pass.\n\nFailure output:\n${output || "(no output)"}`,
-        );
       } catch {
-        // Plain sessions have no workspace review state. Verification command
-        // failures are persisted and surfaced by the review inspector.
+        // Plain sessions have no workspace review state.
       } finally {
         verifying.current.delete(sessionId);
       }
@@ -182,7 +152,7 @@ export default function Fleet() {
           event.status === "idle" &&
           event.sessionId
         ) {
-          void verifyAfterTurn(event.sessionId);
+          void resolveReviewAfterTurn(event.sessionId);
         }
         buffer.push(event);
         schedule();

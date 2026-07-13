@@ -1,13 +1,15 @@
 import { Settings as SettingsIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSettings, type ToolDisplay } from "./lib/settingsStore";
 import TrustProfiles from "./TrustProfiles";
 import BudgetSettings from "./BudgetSettings";
 import ProjectDefaults from "./ProjectDefaults";
 import {
   checkForUpdate,
+  getAppVersion,
   installUpdate,
   restartApp,
+  setLastCheckedAt,
   type UpdateCheck,
 } from "./lib/update";
 
@@ -90,10 +92,17 @@ function UpdatesSection() {
   >("idle");
   const [result, setResult] = useState<UpdateCheck | null>(null);
   const [installError, setInstallError] = useState("");
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getAppVersion().then(setVersion);
+  }, []);
 
   const onCheck = async () => {
     setInstallError("");
     setState("checking");
+    // Manual check bypasses the throttle, but still defers the next automatic one.
+    setLastCheckedAt(Date.now());
     setResult(await checkForUpdate());
     setState("idle");
   };
@@ -155,6 +164,15 @@ function UpdatesSection() {
           Update installation failed: {installError}
         </p>
       )}
+      <div className="settings__row">
+        <label className="settings__label">
+          <span>Current version</span>
+          <span className="muted">Include this when reporting an issue.</span>
+        </label>
+        <span className="settings__version" aria-label="current version">
+          {version ? `v${version}` : "—"}
+        </span>
+      </div>
     </div>
   );
 }

@@ -5,16 +5,15 @@ import {
   CircleAlert,
   FileDiff,
   GitCommitHorizontal,
-  GitMerge,
-  GitPullRequest,
+  Info,
   Maximize2,
   Minimize2,
   RefreshCw,
+  Upload,
   X,
 } from "lucide-react";
 import type {
   CheckResult,
-  MergePreview,
   ReviewStage,
   WorkspaceReviewState,
 } from "./lib/bindings";
@@ -26,9 +25,7 @@ import {
   workspaceCheck,
   workspaceCommit,
   workspaceDiff,
-  workspaceMerge,
-  workspaceMergePreview,
-  workspaceOpenPr,
+  workspacePush,
   workspaceReviewState,
 } from "./lib/ipc";
 import { useFleet } from "./lib/fleetStore";
@@ -36,10 +33,8 @@ import { useFleet } from "./lib/fleetStore";
 const STAGE_LABEL: Record<ReviewStage, string> = {
   active: "In progress",
   needsReview: "Needs review",
-  checksFailed: "Checks failed",
   readyToLand: "Ready to land",
-  pullRequestOpen: "Pull request open",
-  merged: "Merged",
+  pushed: "Pushed",
 };
 
 /** Codex-style review inspector: changes + verification evidence + landing. */
@@ -78,11 +73,10 @@ export default function ReviewPanel({
   );
   const [diff, setDiff] = useState<string | null>(fixture?.diff ?? null);
   const [check, setCheck] = useState<CheckResult | null>(null);
-  const [preview, setPreview] = useState<MergePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
-  const merging = useRef(false);
+  const pushing = useRef(false);
   const archiving = useRef(false);
 
   const files = useMemo(() => parseUnifiedDiff(diff ?? ""), [diff]);
@@ -90,21 +84,13 @@ export default function ReviewPanel({
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
   const checkScript = review?.lastCheck?.script || defaultCheckScript;
   const ready = review?.stage === "readyToLand";
-  const landed =
-    review?.stage === "merged" || review?.stage === "pullRequestOpen";
-  const landingBlocked =
-    !ready || review?.hasUncommittedChanges || preview?.clean === false;
+  const landed = review?.stage === "pushed";
 
   async function refresh(): Promise<WorkspaceReviewState | null> {
     try {
       const next = await workspaceReviewState(sessionId);
       setReview(next);
       setStoredReview(sessionId, next);
-      if (next.hasChanges) {
-        setPreview(await workspaceMergePreview(sessionId).catch(() => null));
-      } else {
-        setPreview(null);
-      }
       return next;
     } catch (cause) {
       setError(String(cause));
@@ -127,17 +113,12 @@ export default function ReviewPanel({
   useEffect(() => {
     if (fixture) return;
     let active = true;
-    Promise.all([
-      workspaceReviewState(sessionId),
-      workspaceDiff(sessionId),
-      workspaceMergePreview(sessionId).catch(() => null),
-    ])
-      .then(([next, patch, mergeState]) => {
+    Promise.all([workspaceReviewState(sessionId), workspaceDiff(sessionId)])
+      .then(([next, patch]) => {
         if (!active) return;
         setReview(next);
         setStoredReview(sessionId, next);
         setDiff(patch);
-        setPreview(next.hasChanges ? mergeState : null);
       })
       .catch((cause) => {
         if (active) setError(String(cause));
@@ -162,59 +143,31 @@ export default function ReviewPanel({
     }
   }
 
-  async function merge() {
-    if (merging.current || landingBlocked) return;
-    merging.current = true;
+  async function push() {
+    if (pushing.current || !ready) return;
+    pushing.current = true;
     setBusy(true);
     setError("");
     try {
-      const mergeState = await workspaceMergePreview(sessionId);
-      setPreview(mergeState);
-      if (!mergeState.clean) {
-        setError(
-          `Merge would conflict in: ${mergeState.conflictedFiles.join(", ") || "unknown files"}.`,
-        );
-        return;
-      }
-      const ok = await confirmDialog(
-        "Merge this verified workspace into its base branch?",
-        "Merge workspace",
-      );
-      if (!ok) return;
-      await workspaceMerge(sessionId);
+      await workspacePush(sessionId);
       await refresh();
-      setNote("Merged into the base branch. The workspace can be archived.");
+      setNote("Pushed to origin. The workspace can be archived.");
     } catch (cause) {
       setError(String(cause));
     } finally {
-      merging.current = false;
+      pushing.current = false;
       setBusy(false);
     }
   }
 
   async function commitChanges() {
-    if (!ready || !review?.hasUncommittedChanges) return;
+    if (!review?.hasUncommittedChanges) return;
     try {
       setBusy(true);
       setError("");
       await workspaceCommit(sessionId, commitMessage);
       await Promise.all([refresh(), loadDiff()]);
-      setNote("Reviewed changes committed. The workspace is ready to land.");
-    } catch (cause) {
-      setError(String(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function openPullRequest() {
-    if (landingBlocked || !review?.hasChanges) return;
-    try {
-      setBusy(true);
-      setError("");
-      const url = await workspaceOpenPr(sessionId);
-      await refresh();
-      setNote(url ? `Pull request opened: ${url}` : "Pull request opened.");
+      setNote("Reviewed changes committed. The workspace is ready to push.");
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -229,7 +182,7 @@ export default function ReviewPanel({
     setError("");
     try {
       const ok = await confirmDialog(
-        "Archive this workspace? Bugyo removes its local worktree. A safely merged branch is deleted; an unmerged pull-request branch is retained.",
+        "Archive this workspace? Bugyo removes its local worktree. A branch already merged into its base is deleted; an unmerged branch (e.g. one you pushed for review) is retained.",
         "Archive workspace",
       );
       if (!ok) return;
@@ -249,32 +202,29 @@ export default function ReviewPanel({
     element?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  const verification =
-    ready || (landed && review?.lastCheck?.success)
+  // Verification is the agent's responsibility (its own tooling, or a Kiro hook
+  // the user configures) — the harness never runs or grades checks, and none of
+  // this blocks committing or landing. Any recorded check is surfaced purely as
+  // informational evidence; the human is the final gate.
+  const verification = review?.lastCheck
+    ? review.lastCheck.success
       ? {
           kind: "passed",
           title: "Checks passed",
-          body: "Verified against the current workspace changes.",
+          body: "The most recent recorded check run succeeded.",
         }
-      : review?.stage === "checksFailed"
-        ? {
-            kind: "failed",
-            title: "Checks failed",
-            body: "The agent needs to fix the failure before this can land.",
-          }
-        : review?.lastCheck
-          ? {
-              kind: "stale",
-              title: "Verification is outdated",
-              body: "The workspace changed after the last check run.",
-            }
-          : {
-              kind: "pending",
-              title: "Agent verification pending",
-              body: checkScript
-                ? "The configured check should run before human review is complete."
-                : "Configure a project check command so the agent can verify its work.",
-            };
+      : {
+          kind: "failed",
+          title: "Checks failed",
+          body: "The most recent recorded check run failed. This is evidence, not a gate — landing is your call.",
+        }
+    : {
+        kind: "none",
+        title: "No checks recorded",
+        body: checkScript
+          ? "The agent verifies its own work. Run the project check here if you want your own evidence — it won't block landing."
+          : "The agent verifies its own work. Optionally configure a project check command for one-click evidence here.",
+      };
 
   return (
     <section className="review-inspector" aria-label="workspace review">
@@ -376,8 +326,10 @@ export default function ReviewPanel({
         >
           {verification.kind === "passed" ? (
             <CheckCircle2 size={17} aria-hidden />
-          ) : (
+          ) : verification.kind === "failed" ? (
             <CircleAlert size={17} aria-hidden />
+          ) : (
+            <Info size={17} aria-hidden />
           )}
           <div>
             <strong>{verification.title}</strong>
@@ -434,19 +386,6 @@ export default function ReviewPanel({
           </details>
         )}
 
-        {preview?.clean === false && (
-          <div className="review__conflict" role="alert">
-            <strong>Merge conflict predicted</strong>
-            <ul>
-              {preview.conflictedFiles.map((file) => (
-                <li key={file}>
-                  <code>{file}</code>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {review?.stage === "active" && (
           <details className="review-inspector__archive">
             <summary>Workspace actions</summary>
@@ -472,26 +411,22 @@ export default function ReviewPanel({
       <footer className="review-inspector__landing">
         <div>
           <strong>
-            {review?.stage === "merged"
-              ? "Merged into the base branch"
-              : review?.stage === "pullRequestOpen"
-                ? "Pull request opened"
-                : ready
-                  ? "Ready for human review"
-                  : verification.title}
+            {review?.stage === "pushed"
+              ? "Pushed to origin"
+              : ready
+                ? "Ready to push"
+                : review?.hasUncommittedChanges
+                  ? "Commit your changes"
+                  : "No changes yet"}
           </strong>
           <span>
-            {review?.stage === "merged"
-              ? "The work is landed. Archive this workspace to clean up its worktree."
-              : review?.stage === "pullRequestOpen"
-                ? "Review continues in the pull request. The local worktree can now be archived."
-                : review?.hasUncommittedChanges
-                  ? "Commit outstanding changes before landing."
-                  : preview?.clean === false
-                    ? "Resolve conflicts before landing."
-                    : ready
-                      ? "Review the diff, then choose the outcome."
-                      : "Landing unlocks after current checks pass."}
+            {review?.stage === "pushed"
+              ? "The branch is on origin. Archive this workspace to clean up its worktree."
+              : review?.hasUncommittedChanges
+                ? "Commit the reviewed changes, then push the branch to origin."
+                : ready
+                  ? "Review the diff, then push the branch to origin."
+                  : "Nothing to push until the agent makes changes."}
           </span>
         </div>
         <div className="review-inspector__landing-actions">
@@ -508,30 +443,20 @@ export default function ReviewPanel({
             <button
               type="button"
               className="review-flow__primary"
-              disabled={busy || !ready}
+              disabled={busy}
               onClick={() => void commitChanges()}
             >
               <GitCommitHorizontal size={14} aria-hidden /> Commit changes
             </button>
           ) : (
-            <>
-              <button
-                type="button"
-                className="pane__action"
-                disabled={busy || landingBlocked || !review?.hasChanges}
-                onClick={() => void openPullRequest()}
-              >
-                <GitPullRequest size={14} aria-hidden /> Open PR
-              </button>
-              <button
-                type="button"
-                className="review-flow__primary"
-                disabled={busy || landingBlocked}
-                onClick={() => void merge()}
-              >
-                <GitMerge size={14} aria-hidden /> Merge
-              </button>
-            </>
+            <button
+              type="button"
+              className="review-flow__primary"
+              disabled={busy || !ready}
+              onClick={() => void push()}
+            >
+              <Upload size={14} aria-hidden /> Push
+            </button>
           )}
         </div>
       </footer>

@@ -987,16 +987,11 @@ code {
   color: #9a6700;
 }
 
-.dot--checksFailed {
-  color: #dc2626;
-}
-
-.dot--readyToLand,
-.dot--pullRequestOpen {
+.dot--readyToLand {
   color: #2563eb;
 }
 
-.dot--merged {
+.dot--pushed {
   color: #08783e;
 }
 
@@ -1796,21 +1791,19 @@ select.chip__input {
   background: var(--panel);
 }
 
-.review-flow__stage--needsReview,
-.review-flow__stage--checksFailed {
+.review-flow__stage--needsReview {
   border-color: #9a6700;
   color: #92400e;
   background: #fffbeb;
 }
 
-.review-flow__stage--readyToLand,
-.review-flow__stage--pullRequestOpen {
+.review-flow__stage--readyToLand {
   border-color: #2563eb;
   color: #1d4ed8;
   background: #eff6ff;
 }
 
-.review-flow__stage--merged {
+.review-flow__stage--pushed {
   border-color: #08783e;
   color: #166534;
   background: #f0fdf4;
@@ -2608,6 +2601,13 @@ select.chip__input {
   font-size: 0.78rem;
 }
 
+.settings__version {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .project-defaults {
   margin-top: 1rem;
   padding: 1rem;
@@ -3129,19 +3129,17 @@ select.chip__input {
   .pane__recovery strong {
     color: #e6f0ff;
   }
-  .review-flow__stage--needsReview,
-  .review-flow__stage--checksFailed {
+  .review-flow__stage--needsReview {
     border-color: #b45309;
     background: #3a2f0b;
     color: #fbbf24;
   }
-  .review-flow__stage--readyToLand,
-  .review-flow__stage--pullRequestOpen {
+  .review-flow__stage--readyToLand {
     border-color: #2b6aa8;
     background: #10233b;
     color: #b4d4ff;
   }
-  .review-flow__stage--merged,
+  .review-flow__stage--pushed,
   .review-flow__note {
     border-color: #2f855a;
     background: #102e22;
@@ -4924,8 +4922,13 @@ button[aria-label],
 
 .titlebar {
   height: 50px;
+  right: auto;
+  width: 180px;
   padding-left: 86px;
-  border-bottom: 1px solid transparent;
+  z-index: 40;
+  border-bottom: 0;
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .titlebar__btn {
@@ -5055,6 +5058,27 @@ button[aria-label],
   padding: 0 1.25rem;
   border-bottom: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.97);
+}
+
+/* When the sidebar is collapsed, keep the header's background full-width so
+   the upper-left corner remains visually continuous. Its content starts after
+   the macOS traffic lights and titlebar controls, which are layered above only
+   this reserved strip. In a split, only the left-most pane reaches the strip. */
+.fleet--sidebar-collapsed > .fleet__main > .pane .pane__header,
+.fleet--sidebar-collapsed
+  > .fleet__main
+  > .panes
+  > .panes__col:first-child
+  .pane__header {
+  padding-left: 190px;
+}
+
+.fleet--sidebar-collapsed
+  > .fleet__main
+  > .panes
+  > .panes__col:not(:first-child)
+  .pane__header {
+  padding-left: 1.25rem;
 }
 
 .pane__title {
