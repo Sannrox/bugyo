@@ -34,7 +34,7 @@ function scheduleLabel(s: Schedule): string {
 /** Human summary of a detector source. */
 function sourceLabel(s: TriggerSource): string {
   return s.type === "command"
-    ? `command: ${s.program} ${s.args.join(" ")}`.trim()
+    ? `${`command: ${s.program} ${s.args.join(" ")}`.trim()} · ${s.cwd ?? "workspace not set"}`
     : `GET ${s.url}`;
 }
 
@@ -359,6 +359,11 @@ function TriggerForm({
   const [args, setArgs] = useState(
     initial?.source.type === "command" ? initial.source.args.join("\n") : "",
   );
+  const [detectorCwd, setDetectorCwd] = useState(
+    initial?.source.type === "command"
+      ? (initial.source.cwd ?? "")
+      : (gitProjects[0]?.path ?? ""),
+  );
   const [url, setUrl] = useState(
     initial?.source.type === "httpGet" ? initial.source.url : "",
   );
@@ -442,6 +447,7 @@ function TriggerForm({
         type: "command",
         program: program.trim(),
         args: splitLines(args),
+        cwd: detectorCwd.trim() || null,
       };
     }
     return { type: "httpGet", url: url.trim(), headers: parseHeaders(headers) };
@@ -500,7 +506,9 @@ function TriggerForm({
   }
 
   const sourceReady =
-    (sourceKind === "command" && Boolean(program.trim())) ||
+    (sourceKind === "command" &&
+      Boolean(program.trim()) &&
+      Boolean(detectorCwd.trim())) ||
     (sourceKind === "httpGet" && Boolean(url.trim()));
   const targetReady =
     (targetKind === "existingSession" && Boolean(sessionId)) ||
@@ -625,10 +633,27 @@ function TriggerForm({
               onChange={(e) => setArgs(e.currentTarget.value)}
             />
           </label>
+          <label className="automations__field">
+            <span>Detector working directory</span>
+            <input
+              aria-label="detector working directory"
+              list="trigger-detector-workspaces"
+              placeholder="Absolute path to the workspace"
+              value={detectorCwd}
+              onChange={(e) => setDetectorCwd(e.currentTarget.value)}
+            />
+            <datalist id="trigger-detector-workspaces">
+              {projects.map((project) => (
+                <option key={project.path} value={project.path}>
+                  {project.name}
+                </option>
+              ))}
+            </datalist>
+          </label>
           <p className="automations__guidance">
-            ⚠ The command runs on your machine with your permissions. Its output
-            is treated as untrusted data and injected into the prompt as clearly
-            delimited context, never as instructions.
+            ⚠ The command runs in this directory on your machine with your
+            permissions. Its output is treated as untrusted data and injected
+            into the prompt as clearly delimited context, never as instructions.
           </p>
         </>
       ) : (
