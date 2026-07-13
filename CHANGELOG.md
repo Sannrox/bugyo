@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-13
+
+### Fixed
+
+- Run command-based trigger detectors in an explicitly configured workspace
+  instead of inheriting Bugyo's process directory. New and edited triggers
+  validate the directory before saving, while legacy triggers fail clearly
+  until a workspace is assigned.
+
 ## [0.3.0] - 2026-07-13
 
 ### Added
@@ -85,7 +94,8 @@ end to end, but expect rough edges and no stability guarantees yet.
   one-time "Open Anyway" step. Developer ID signing + notarization can be
   enabled by adding repo secrets; see `docs/macos-code-signing.md`.
 
-[unreleased]: https://github.com/Sannrox/bugyo/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/Sannrox/bugyo/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Sannrox/bugyo/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Sannrox/bugyo/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Sannrox/bugyo/compare/v0.2.0...v0.2.1
 [0.1.0]: https://github.com/Sannrox/bugyo/releases/tag/v0.1.0
