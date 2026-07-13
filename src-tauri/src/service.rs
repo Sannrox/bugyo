@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
-use crate::acp::client::AcpClient;
+use crate::acp::client::{AcpClient, GRACEFUL_SHUTDOWN};
 use crate::acp::{AcpError, AcpEvent, EventSink};
 use crate::config;
 use crate::orchestrator::{triggers, Dispatched, HeartbeatReport};
@@ -49,12 +49,13 @@ pub const AUTOMATION_SECS: u64 = 30;
 /// honoured). Detection is token-free, so this can be brisk.
 pub const TRIGGER_SECS: u64 = 30;
 
-/// How many times `ensure_client` retries the reclaim + `session/load` when the
-/// session's lock is still held by an exiting process (see the retry loop for
-/// why). Small: the common cause is a released process finishing its teardown.
-const LOAD_ATTEMPTS: usize = 5;
 /// Delay between resume retries while waiting for a stale lock owner to exit.
 const LOAD_RETRY_DELAY: Duration = Duration::from_millis(300);
+/// Retry long enough to cover the complete graceful-shutdown window, plus one
+/// final load attempt after that window has elapsed. Deriving this from the ACP
+/// client's timeout prevents the release and resume policies from drifting.
+const LOAD_ATTEMPTS: usize =
+    (GRACEFUL_SHUTDOWN.as_millis() / LOAD_RETRY_DELAY.as_millis()) as usize + 2;
 
 /// Whether an agent error from `session/load` is kiro-cli's session-lock
 /// collision ("Session is active in another process (PID N)"), i.e. the lock is

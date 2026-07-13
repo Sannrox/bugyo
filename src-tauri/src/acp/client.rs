@@ -34,7 +34,7 @@ const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
 /// before we escalate to SIGKILL. A clean exit lets kiro-cli remove its own
 /// session `.lock`; the lock is what a subsequent resume trips over
 /// ("Session is active in another process") if the process is still alive.
-const GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(3);
+pub(crate) const GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(3);
 
 /// A live ACP client connected to one agent process/transport.
 pub struct AcpClient {
