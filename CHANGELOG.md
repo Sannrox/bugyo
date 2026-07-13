@@ -6,6 +6,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-13
+
+### Added
+
+- **Event-driven triggers** with command and HTTP GET detectors, JSON or
+  line-based parsing, durable de-duplication, fan-out and batch modes, bounded
+  dispatch, typed IPC, and visible run history. Detector output is explicitly
+  treated as untrusted data, and manual test firing warns before spending tokens.
+- Dedicated Search, Plugins, Attention, Fleet, Event Log, Automations, Triggers,
+  and Settings destinations in the desktop navigation.
+- Per-project defaults, editable queues, stronger budget and trust surfaces, and
+  deterministic visual fixtures for the primary application screens.
+
+### Changed
+
+- Rebuilt the desktop experience around a focused, Codex-style workspace with a
+  clearer create → observe → approve → review → check → land/archive task flow.
+- Redesigned workspace review and landing with contextual, collapsible panels,
+  explicit clean/dirty/conflict states, safer merge gates, and persistent
+  controls for long transcripts and narrow layouts.
+- Simplified task creation while preserving isolated worktrees by default and
+  progressively disclosing advanced session controls.
+
+### Fixed
+
+- Hardened workspace rollback, queue persistence, loading/error states, trust
+  controls, and keyboard accessibility across the main workflows.
+- Prevented resumed sessions from replaying transcript history into visible
+  output and credit metrics.
+- Preserved unmatched trigger items when action dispatch fails so later polls
+  can retry them instead of silently consuming them.
+- Prevented manual trigger runs from producing duplicate history entries.
+
 ## [0.2.1] - 2026-07-09
 
 ### Fixed
@@ -52,6 +85,7 @@ end to end, but expect rough edges and no stability guarantees yet.
   one-time "Open Anyway" step. Developer ID signing + notarization can be
   enabled by adding repo secrets; see `docs/macos-code-signing.md`.
 
-[unreleased]: https://github.com/Sannrox/bugyo/compare/v0.2.1...HEAD
+[unreleased]: https://github.com/Sannrox/bugyo/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Sannrox/bugyo/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Sannrox/bugyo/compare/v0.2.0...v0.2.1
 [0.1.0]: https://github.com/Sannrox/bugyo/releases/tag/v0.1.0

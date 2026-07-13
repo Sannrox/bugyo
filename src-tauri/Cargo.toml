@@ -1,6 +1,6 @@
 [package]
 name = "bugyo"
-version = "0.2.1"
+version = "0.3.0"
 description = "Bugyo — a command center for kiro-cli sessions"
 authors = ["The Bugyo Authors"]
 edition = "2021"
@@ -57,4 +57,3 @@ objc2 = "0.6"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-
