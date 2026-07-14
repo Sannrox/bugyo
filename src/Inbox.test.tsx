@@ -51,6 +51,27 @@ describe("Attention inbox", () => {
     expect(useFleet.getState().panel).toBe("fleet");
   });
 
+  it("includes workspace changes that are waiting for review", () => {
+    useFleet.getState().addSession({
+      sessionId: "review-1",
+      connected: false,
+      review: {
+        stage: "needsReview",
+        hasChanges: true,
+        hasUncommittedChanges: false,
+        changedFiles: ["src/Inbox.tsx"],
+        lastCheck: null,
+      },
+    });
+
+    render(<Inbox />);
+
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Review changes")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open review" }));
+    expect(useFleet.getState().activeId).toBe("review-1");
+  });
+
   it("submits a permission decision only once while the agent resumes", async () => {
     addApproval();
     render(<Inbox />);

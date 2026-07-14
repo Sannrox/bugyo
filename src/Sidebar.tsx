@@ -34,7 +34,11 @@ import {
 import { useFleet, type FleetStore } from "./lib/fleetStore";
 import { relativeTime } from "./lib/format";
 import { persistMeta, persistOrder } from "./lib/sessionMeta";
-import { effectiveStatus, type DisplayStatus } from "./lib/review";
+import {
+  effectiveStatus,
+  needsAttention,
+  type DisplayStatus,
+} from "./lib/review";
 
 const DOT_CLASS: Record<DisplayStatus, string> = {
   disconnected: "dot--disconnected",
@@ -241,8 +245,8 @@ export default function Sidebar() {
   const moveSession = useFleet((s) => s.moveSession);
   const attention = useFleet(
     (s) =>
-      Object.values(s.sessions).filter(
-        (x) => x.state.status === "needsApproval" || x.state.status === "error",
+      Object.values(s.sessions).filter((x) =>
+        needsAttention(x.state.status, x.review),
       ).length,
   );
   // Shared clock for relative "last active" labels — one interval for all rows.

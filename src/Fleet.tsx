@@ -15,6 +15,7 @@ import {
   workspaceReviewState,
 } from "./lib/ipc";
 import { useFleet } from "./lib/fleetStore";
+import { needsAttention } from "./lib/review";
 import { useBudget } from "./lib/budgetStore";
 import { useSettings } from "./lib/settingsStore";
 import { hydrateSessionMeta } from "./lib/sessionMeta";
@@ -53,8 +54,8 @@ export default function Fleet() {
   // Mirror the attention count to the OS dock/taskbar badge.
   const attentionCount = useFleet(
     (s) =>
-      Object.values(s.sessions).filter(
-        (x) => x.state.status === "needsApproval" || x.state.status === "error",
+      Object.values(s.sessions).filter((x) =>
+        needsAttention(x.state.status, x.review),
       ).length,
   );
   useEffect(() => {
