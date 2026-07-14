@@ -85,6 +85,26 @@ describe("Automations panel", () => {
     expect(screen.getByText(/session sess-123/)).toBeInTheDocument();
   });
 
+  it("resets form state when switching directly between editors", async () => {
+    const { automationList } = await import("./lib/ipc");
+    vi.mocked(automationList).mockResolvedValueOnce([
+      existing,
+      { ...existing, id: "a2", name: "morning triage" },
+    ]);
+    render(<Automations />);
+    await screen.findByText("morning triage");
+
+    fireEvent.click(screen.getByLabelText("edit nightly triage"));
+    fireEvent.change(screen.getByLabelText("automation name"), {
+      target: { value: "stale edit" },
+    });
+    fireEvent.click(screen.getByLabelText("edit morning triage"));
+
+    expect(screen.getByLabelText("automation name")).toHaveValue(
+      "morning triage",
+    );
+  });
+
   it("toggles enable through automationUpdate", async () => {
     render(<Automations />);
     await waitFor(() => screen.getByText("nightly triage"));

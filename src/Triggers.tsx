@@ -175,6 +175,7 @@ export default function Triggers() {
 
       {editing && (
         <TriggerForm
+          key={editing === "new" ? "new" : editing.id}
           initial={editing === "new" ? null : editing}
           onCancel={() => setEditing(null)}
           onSaved={() => {
@@ -526,10 +527,22 @@ function TriggerForm({
     actionKind === "automation"
       ? Boolean(automationId)
       : Boolean(prompt.trim()) && targetReady;
+  const intervalReady =
+    scheduleKind !== "interval" ||
+    (Number.isFinite(intervalSecs) &&
+      Number.isInteger(intervalSecs) &&
+      intervalSecs >= 1);
+  const maxRunsReady =
+    Number.isFinite(maxRuns) &&
+    Number.isInteger(maxRuns) &&
+    maxRuns >= 1 &&
+    maxRuns <= 20;
   const canSubmit =
     Boolean(name.trim()) &&
     sourceReady &&
     actionReady &&
+    intervalReady &&
+    maxRunsReady &&
     (scheduleKind !== "cron" || Boolean(cronExpr.trim()));
 
   async function submit() {
@@ -723,7 +736,12 @@ function TriggerForm({
           <input
             type="number"
             min={1}
+            step={1}
             aria-label="interval seconds"
+            aria-invalid={!intervalReady}
+            aria-describedby={
+              !intervalReady ? "trigger-interval-error" : undefined
+            }
             value={intervalSecs}
             onChange={(e) => setIntervalSecs(Number(e.currentTarget.value))}
           />
@@ -769,12 +787,36 @@ function TriggerForm({
             type="number"
             min={1}
             max={20}
+            step={1}
             aria-label="max runs per tick"
+            aria-invalid={!maxRunsReady}
+            aria-describedby={
+              !maxRunsReady ? "trigger-max-runs-error" : undefined
+            }
             value={maxRuns}
             onChange={(e) => setMaxRuns(Number(e.currentTarget.value))}
           />
         </label>
       </div>
+
+      {!intervalReady && (
+        <p
+          id="trigger-interval-error"
+          role="status"
+          className="automations__guidance error"
+        >
+          Enter an interval of at least 1 whole second.
+        </p>
+      )}
+      {!maxRunsReady && (
+        <p
+          id="trigger-max-runs-error"
+          role="status"
+          className="automations__guidance error"
+        >
+          Enter a whole-number run limit from 1 to 20.
+        </p>
+      )}
 
       {actionKind === "automation" ? (
         <label className="automations__field">

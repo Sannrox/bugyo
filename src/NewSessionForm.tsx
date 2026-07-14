@@ -29,6 +29,7 @@ export default function NewSessionForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const submitting = useRef(false);
+  const profileRequest = useRef(0);
 
   const [trustTools, setTrustTools] = useState("");
   // Trust-profile presets (loaded from the backend); picking one fills
@@ -45,11 +46,14 @@ export default function NewSessionForm() {
   }, []);
 
   async function applyProfile(id: string) {
+    const request = ++profileRequest.current;
     setProfileId(id);
     if (!id) return;
     try {
       const tools = await trustProfileEffectiveTools(id);
-      setTrustTools(tools.join(", "));
+      if (request === profileRequest.current) {
+        setTrustTools(tools.join(", "));
+      }
     } catch {
       /* leave trustTools unchanged on error */
     }
@@ -131,7 +135,7 @@ export default function NewSessionForm() {
         workspace: result.workspace,
       });
       setTask("");
-      setSetupScript("");
+      setSetupScript(selectedProject?.setupScript || "");
     } catch (e) {
       setError(String(e));
     } finally {
