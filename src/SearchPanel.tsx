@@ -21,7 +21,7 @@ function sessionName(sess: {
   return (
     (sess.name ?? sess.workspace?.task) ||
     sess.workspace?.branch ||
-    `session ${sess.sessionId.slice(0, 8)}`
+    "Plain session"
   );
 }
 
