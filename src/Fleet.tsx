@@ -251,7 +251,7 @@ export default function Fleet() {
     <div
       className={`fleet${sidebarCollapsed ? " fleet--sidebar-collapsed" : ""}`}
     >
-      <Sidebar />
+      {!sidebarCollapsed && <Sidebar />}
       <main className="fleet__main">
         <UpdateBanner />
         {errors.length > 0 && (

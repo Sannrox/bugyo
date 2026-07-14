@@ -142,6 +142,7 @@ export interface WorkspaceReviewState {
   hasUncommittedChanges: boolean;
   changedFiles: string[];
   lastCheck: ReviewCheck | null;
+  checkCurrent: boolean;
 }
 
 /** Mirrors `acp::SessionStatus`. */

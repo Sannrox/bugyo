@@ -305,6 +305,7 @@ function AutomationForm({
 }) {
   const projects = useFleet((s) => s.projects);
   const submitting = useRef(false);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const sessionOrder = useFleet((s) => s.order);
   const sessions = useFleet((s) => s.sessions);
   const gitProjects = projects.filter((p) => p.isGitRepo);
@@ -364,6 +365,13 @@ function AutomationForm({
     initial?.trust.type === "trustTools" ? initial.trust.tools.join(", ") : "",
   );
 
+  useEffect(() => {
+    // Tauri's WKWebView can restore focus to the activating button after the
+    // form commits, so reinforce autofocus after that native click completes.
+    const timer = window.setTimeout(() => nameInputRef.current?.focus(), 100);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   function buildSchedule(): Schedule {
     return scheduleKind === "interval"
       ? { type: "intervalSecs", secs: Math.max(1, Math.floor(intervalSecs)) }
@@ -417,11 +425,17 @@ function AutomationForm({
   const trustReady =
     trustKind !== "trustTools" ||
     trustTools.split(",").some((tool) => tool.trim().length > 0);
+  const intervalReady =
+    scheduleKind !== "interval" ||
+    (Number.isFinite(intervalSecs) &&
+      Number.isInteger(intervalSecs) &&
+      intervalSecs >= 1);
   const canSubmit =
     Boolean(name.trim()) &&
     Boolean(prompt.trim()) &&
     targetReady &&
     trustReady &&
+    intervalReady &&
     (scheduleKind !== "cron" || Boolean(cronExpr.trim()));
 
   async function submit() {
@@ -475,6 +489,8 @@ function AutomationForm({
       <label className="automations__field">
         <span>Name</span>
         <input
+          autoFocus
+          ref={nameInputRef}
           aria-label="automation name"
           placeholder="e.g. Morning CI triage"
           value={name}
@@ -515,7 +531,12 @@ function AutomationForm({
           <input
             type="number"
             min={1}
+            step={1}
             aria-label="interval seconds"
+            aria-invalid={!intervalReady}
+            aria-describedby={
+              !intervalReady ? "automation-interval-error" : undefined
+            }
             value={intervalSecs}
             onChange={(e) => setIntervalSecs(Number(e.currentTarget.value))}
           />
@@ -653,6 +674,15 @@ function AutomationForm({
       {!trustReady && (
         <p role="status" className="automations__guidance">
           Add at least one tool, or switch trust back to Ask.
+        </p>
+      )}
+      {!intervalReady && (
+        <p
+          id="automation-interval-error"
+          role="status"
+          className="automations__guidance error"
+        >
+          Enter an interval of at least 1 whole second.
         </p>
       )}
 

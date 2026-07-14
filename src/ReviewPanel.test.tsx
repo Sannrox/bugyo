@@ -51,6 +51,7 @@ function review(
             changeFingerprint: "abc",
           }
         : null,
+    checkCurrent: stage === "readyToLand",
     ...overrides,
   };
 }
@@ -132,6 +133,7 @@ describe("ReviewPanel — git-only push workflow", () => {
             completedAt: "2026-07-10T12:00:00Z",
             changeFingerprint: "abc",
           },
+          checkCurrent: true,
         }),
       )
       .mockResolvedValueOnce(review("readyToLand"))
@@ -151,6 +153,20 @@ describe("ReviewPanel — git-only push workflow", () => {
     fireEvent.click(push);
 
     await waitFor(() => expect(workspacePush).toHaveBeenCalledWith("s1"));
+  });
+
+  it("marks recorded checks stale after the workspace changes", async () => {
+    vi.mocked(workspaceReviewState).mockResolvedValue(
+      review("readyToLand", { checkCurrent: false }),
+    );
+
+    render(<ReviewPanel sessionId="s1" />);
+
+    const evidence = await screen.findByLabelText("verification evidence");
+    expect(within(evidence).getByText(/checks are stale/i)).toBeVisible();
+    expect(
+      within(evidence).queryByText(/checks passed/i),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces a push failure without recording a landing", async () => {

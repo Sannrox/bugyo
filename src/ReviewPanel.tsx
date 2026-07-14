@@ -207,17 +207,23 @@ export default function ReviewPanel({
   // this blocks committing or landing. Any recorded check is surfaced purely as
   // informational evidence; the human is the final gate.
   const verification = review?.lastCheck
-    ? review.lastCheck.success
+    ? !review.checkCurrent
       ? {
-          kind: "passed",
-          title: "Checks passed",
-          body: "The most recent recorded check run succeeded.",
+          kind: "none",
+          title: "Checks are stale",
+          body: "The workspace changed after this check ran. Treat it as historical evidence and rerun checks for the current changes.",
         }
-      : {
-          kind: "failed",
-          title: "Checks failed",
-          body: "The most recent recorded check run failed. This is evidence, not a gate — landing is your call.",
-        }
+      : review.lastCheck.success
+        ? {
+            kind: "passed",
+            title: "Checks passed",
+            body: "The most recent recorded check run succeeded.",
+          }
+        : {
+            kind: "failed",
+            title: "Checks failed",
+            body: "The most recent recorded check run failed. This is evidence, not a gate — landing is your call.",
+          }
     : {
         kind: "none",
         title: "No checks recorded",

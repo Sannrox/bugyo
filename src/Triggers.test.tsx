@@ -178,6 +178,10 @@ describe("Triggers panel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new trigger/i }));
 
+    await waitFor(() =>
+      expect(screen.getByLabelText("trigger name")).toHaveFocus(),
+    );
+
     fireEvent.change(screen.getByLabelText("trigger name"), {
       target: { value: "watch CI" },
     });

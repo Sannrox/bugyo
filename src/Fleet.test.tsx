@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import type { AcpEvent } from "./lib/bindings";
 import { useFleet } from "./lib/fleetStore";
+import { useSettings } from "./lib/settingsStore";
 
 const h = vi.hoisted(() => ({
   handler: null as null | ((e: AcpEvent) => void),
@@ -126,6 +127,20 @@ describe("Fleet", () => {
       projects: [],
       errors: [],
     });
+    useSettings.setState({ sidebarCollapsed: false });
+  });
+
+  it("removes the collapsed sidebar from keyboard and accessibility navigation", () => {
+    render(<Fleet />);
+
+    expect(
+      screen.getByRole("navigation", { name: /workspaces/i }),
+    ).toBeInTheDocument();
+    act(() => useSettings.setState({ sidebarCollapsed: true }));
+
+    expect(
+      screen.queryByRole("navigation", { name: /workspaces/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces startup failures and retries hydration in place", async () => {
@@ -272,6 +287,7 @@ describe("Fleet", () => {
         hasUncommittedChanges: false,
         changedFiles: ["src/main.rs"],
         lastCheck: null,
+        checkCurrent: false,
       })
       .mockResolvedValueOnce({
         stage: "readyToLand",
@@ -285,6 +301,7 @@ describe("Fleet", () => {
           completedAt: "2026-07-10T12:00:00Z",
           changeFingerprint: "abc",
         },
+        checkCurrent: true,
       });
 
     // Open the inspector without replacing the conversation or composer.
@@ -333,6 +350,7 @@ describe("Fleet", () => {
         hasUncommittedChanges: true,
         changedFiles: ["src/main.rs"],
         lastCheck: null,
+        checkCurrent: false,
       });
 
     act(() => {

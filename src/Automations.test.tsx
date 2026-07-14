@@ -215,6 +215,10 @@ describe("Automations panel", () => {
     await waitFor(() => screen.getByText("nightly triage"));
     fireEvent.click(screen.getByRole("button", { name: /new automation/i }));
 
+    await waitFor(() =>
+      expect(screen.getByLabelText("automation name")).toHaveFocus(),
+    );
+
     fireEvent.change(screen.getByLabelText("automation name"), {
       target: { value: "morning brief" },
     });
@@ -223,6 +227,26 @@ describe("Automations panel", () => {
     });
 
     expect(screen.getByText(/choose a valid target/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^create$/i })).toBeDisabled();
+  });
+
+  it("explains and blocks invalid interval values", async () => {
+    useFleet.getState().addSession({ sessionId: "target-session" });
+    render(<Automations />);
+    await screen.findByText("nightly triage");
+    fireEvent.click(screen.getByRole("button", { name: /new automation/i }));
+    fireEvent.change(screen.getByLabelText("automation name"), {
+      target: { value: "fast loop" },
+    });
+    fireEvent.change(screen.getByLabelText("durable prompt"), {
+      target: { value: "Check continuously." },
+    });
+
+    const interval = screen.getByLabelText("interval seconds");
+    fireEvent.change(interval, { target: { value: "0" } });
+
+    expect(interval).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/at least 1 whole second/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^create$/i })).toBeDisabled();
   });
 

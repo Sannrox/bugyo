@@ -335,6 +335,7 @@ function TriggerForm({
 }) {
   const projects = useFleet((s) => s.projects);
   const submitting = useRef(false);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const sessionOrder = useFleet((s) => s.order);
   const sessions = useFleet((s) => s.sessions);
   const gitProjects = projects.filter((p) => p.isGitRepo);
@@ -440,6 +441,13 @@ function TriggerForm({
       ? initial.action.trust.tools.join(", ")
       : "",
   );
+
+  useEffect(() => {
+    // Tauri's WKWebView can restore focus to the activating button after the
+    // form commits, so reinforce autofocus after that native click completes.
+    const timer = window.setTimeout(() => nameInputRef.current?.focus(), 100);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   function buildSource(): TriggerSource {
     if (sourceKind === "command") {
@@ -583,6 +591,8 @@ function TriggerForm({
       <label className="automations__field">
         <span>Name</span>
         <input
+          autoFocus
+          ref={nameInputRef}
           aria-label="trigger name"
           placeholder="e.g. New PRs on my-repo"
           value={name}
