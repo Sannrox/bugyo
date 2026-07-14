@@ -85,6 +85,17 @@ describe("SearchPanel", () => {
     expect(useFleet.getState().activeId).toBe("a");
   });
 
+  it("uses the sidebar label for an unnamed plain session", () => {
+    const { addSession } = useFleet.getState();
+    addSession({ sessionId: "plain-session", workspace: null });
+    useFleet.setState({ activeId: null, panel: "search" });
+
+    render(<SearchPanel />);
+
+    expect(screen.getByText("Plain session")).toBeInTheDocument();
+    expect(screen.queryByText(/session plain-se/i)).toBeNull();
+  });
+
   it("shows an empty state when there are no matches", async () => {
     vi.mocked(sessionSearch).mockResolvedValueOnce([]);
     render(<SearchPanel />);
