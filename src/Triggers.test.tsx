@@ -106,6 +106,24 @@ describe("Triggers panel", () => {
     expect(screen.getByText(/inline action/)).toBeInTheDocument();
   });
 
+  it("resets form state when switching directly between editors", async () => {
+    const { triggerList } = await import("./lib/ipc");
+    vi.mocked(triggerList).mockResolvedValueOnce([
+      existing,
+      { ...existing, id: "t2", name: "new issues" },
+    ]);
+    render(<Triggers />);
+    await screen.findByText("new issues");
+
+    fireEvent.click(screen.getByLabelText("edit new PRs"));
+    fireEvent.change(screen.getByLabelText("trigger name"), {
+      target: { value: "stale edit" },
+    });
+    fireEvent.click(screen.getByLabelText("edit new issues"));
+
+    expect(screen.getByLabelText("trigger name")).toHaveValue("new issues");
+  });
+
   it("toggles enable through triggerUpdate", async () => {
     render(<Triggers />);
     await waitFor(() => screen.getByText("new PRs"));
@@ -222,6 +240,41 @@ describe("Triggers panel", () => {
         }),
       ),
     );
+  });
+
+  it("blocks invalid interval and run-limit values", async () => {
+    useFleet.setState({
+      projects: [
+        {
+          path: "/repo",
+          name: "repo",
+          isGitRepo: true,
+          baseBranch: "main",
+          setupScript: "",
+          checkScript: "",
+        },
+      ],
+    });
+    render(<Triggers />);
+    await screen.findByText("new PRs");
+    fireEvent.click(screen.getByRole("button", { name: /new trigger/i }));
+    fireEvent.change(screen.getByLabelText("trigger name"), {
+      target: { value: "invalid limits" },
+    });
+    fireEvent.change(screen.getByLabelText("inline prompt"), {
+      target: { value: "Inspect the item." },
+    });
+
+    const interval = screen.getByLabelText("interval seconds");
+    const maxRuns = screen.getByLabelText("max runs per tick");
+    fireEvent.change(interval, { target: { value: "0" } });
+    fireEvent.change(maxRuns, { target: { value: "21" } });
+
+    expect(interval).toHaveAttribute("aria-invalid", "true");
+    expect(maxRuns).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/at least 1 whole second/i)).toBeInTheDocument();
+    expect(screen.getByText(/run limit from 1 to 20/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^create$/i })).toBeDisabled();
   });
 
   it("builds an HTTP GET detector with an env-referencing header", async () => {

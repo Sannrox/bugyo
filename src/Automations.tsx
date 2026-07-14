@@ -170,6 +170,7 @@ export default function Automations() {
 
       {editing && (
         <AutomationForm
+          key={editing === "new" ? "new" : editing.id}
           initial={editing === "new" ? null : editing}
           onCancel={() => setEditing(null)}
           onSaved={() => {

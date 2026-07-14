@@ -153,6 +153,49 @@ describe("NewSessionForm", () => {
         }),
       ),
     );
+
+    fireEvent.change(screen.getByLabelText("task"), {
+      target: { value: "Use defaults again" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
+    await waitFor(() => expect(workspaceCreate).toHaveBeenCalledTimes(2));
+    expect(workspaceCreate).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        baseBranch: "develop",
+        setupScript: "bun install",
+      }),
+    );
+  });
+
+  it("resets a one-off setup command to the project default", async () => {
+    useFleet.setState({
+      projects: [
+        {
+          path: "/repo",
+          name: "repo",
+          isGitRepo: true,
+          baseBranch: "main",
+          setupScript: "bun install",
+          checkScript: "bun run test",
+        },
+      ],
+    });
+    render(<NewSessionForm />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("project")).toHaveValue("/repo"),
+    );
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.change(screen.getByLabelText("setup script"), {
+      target: { value: "./one-off-setup.sh" },
+    });
+    fireEvent.change(screen.getByLabelText("task"), {
+      target: { value: "First task" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create workspace/i }));
+
+    const { workspaceCreate } = await import("./lib/ipc");
+    await waitFor(() => expect(workspaceCreate).toHaveBeenCalledTimes(1));
+    expect(screen.getByLabelText("setup script")).toHaveValue("bun install");
   });
 
   it("only starts an unisolated session after the user selects plain mode", async () => {
@@ -179,5 +222,38 @@ describe("NewSessionForm", () => {
 
     expect(screen.queryByText(/^trust all tools$/i)).not.toBeInTheDocument();
     expect(screen.getByText(/always ask for approval/i)).toBeInTheDocument();
+  });
+
+  it("ignores a stale trust-profile response", async () => {
+    const { trustProfileEffectiveTools, trustProfileList } =
+      await import("./lib/ipc");
+    vi.mocked(trustProfileList).mockResolvedValueOnce([
+      { id: "a", name: "Profile A", autoAllowTools: [], alwaysAsk: [] },
+      { id: "b", name: "Profile B", autoAllowTools: [], alwaysAsk: [] },
+    ]);
+    let resolveA!: (tools: string[]) => void;
+    let resolveB!: (tools: string[]) => void;
+    vi.mocked(trustProfileEffectiveTools).mockImplementation(
+      (id) =>
+        new Promise((resolve) => {
+          if (id === "a") resolveA = resolve;
+          else resolveB = resolve;
+        }),
+    );
+
+    render(<NewSessionForm />);
+    fireEvent.click(screen.getByText("Advanced"));
+    const profiles = await screen.findByLabelText("trust profile");
+    fireEvent.change(profiles, { target: { value: "a" } });
+    fireEvent.change(profiles, { target: { value: "b" } });
+    resolveB(["read"]);
+    await waitFor(() =>
+      expect(screen.getByLabelText("trust tools")).toHaveValue("read"),
+    );
+    resolveA(["shell"]);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("trust tools")).toHaveValue("read"),
+    );
   });
 });

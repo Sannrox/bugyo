@@ -133,6 +133,25 @@ describe("FleetGrid", () => {
     expect(screen.queryByText("fix-search")).not.toBeInTheDocument();
   });
 
+  it("clears bulk selection when filters change", () => {
+    const { addSession } = useFleet.getState();
+    addSession({ sessionId: "a", workspace: ws("fix-search", "/repo1") });
+    addSession({ sessionId: "b", workspace: ws("review-billing", "/repo1") });
+
+    render(<FleetGrid />);
+    fireEvent.click(screen.getByLabelText("select fix-search"));
+    expect(screen.getByLabelText("bulk actions")).toHaveTextContent(
+      "1 selected",
+    );
+
+    fireEvent.change(screen.getByLabelText("search fleet"), {
+      target: { value: "billing" },
+    });
+
+    expect(screen.queryByLabelText("bulk actions")).not.toBeInTheDocument();
+    expect(screen.queryByText("fix-search")).not.toBeInTheDocument();
+  });
+
   it("focuses a session when its card open button is clicked", () => {
     const { addSession } = useFleet.getState();
     addSession({ sessionId: "a", workspace: ws("feat-a", "/repo1") });

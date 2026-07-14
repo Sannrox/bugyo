@@ -402,12 +402,18 @@ export default function FleetGrid() {
           aria-label="search fleet"
           placeholder="Search tasks, branches, or recent output…"
           value={query}
-          onChange={(event) => setQuery(event.currentTarget.value)}
+          onChange={(event) => {
+            clearSelection();
+            setQuery(event.currentTarget.value);
+          }}
         />
         <select
           aria-label="filter by project"
           value={projectFilter}
-          onChange={(event) => setProjectFilter(event.currentTarget.value)}
+          onChange={(event) => {
+            clearSelection();
+            setProjectFilter(event.currentTarget.value);
+          }}
         >
           <option value="all">All projects</option>
           {projects.map((project) => (
@@ -419,7 +425,10 @@ export default function FleetGrid() {
         <select
           aria-label="filter by status"
           value={statusFilter}
-          onChange={(event) => setStatusFilter(event.currentTarget.value)}
+          onChange={(event) => {
+            clearSelection();
+            setStatusFilter(event.currentTarget.value);
+          }}
         >
           <option value="all">All statuses</option>
           <option value="working">Working</option>
@@ -433,6 +442,7 @@ export default function FleetGrid() {
             type="button"
             className="pane__action"
             onClick={() => {
+              clearSelection();
               setQuery("");
               setProjectFilter("all");
               setStatusFilter("all");
