@@ -4903,7 +4903,7 @@ button[aria-label],
   --panel: #ffffff;
   --panel-subtle: #f7f7f8;
   --border: #e6e6e7;
-  --muted: #7d7d82;
+  --muted: #686d76;
   --text: #202124;
   --hover: #ededee;
   --hover-strong: #e3e3e4;
@@ -5341,5 +5341,71 @@ button[aria-label],
   }
   .plugin-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Compact desktop windows are a primary Bugyo use case. Keep owner actions and
+   fleet state visible without spending the first viewport on summary chrome. */
+.fleetgrid__new {
+  flex: none;
+  white-space: nowrap;
+}
+
+.automations__formhead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -1.1rem -1.1rem 0;
+  padding: 0.9rem 1.1rem 0.8rem;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: 0 8px 18px rgba(15, 18, 24, 0.05);
+  backdrop-filter: blur(8px);
+}
+
+.automations__formhead-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.inbox__review {
+  padding: 0.65rem 0.75rem;
+  border-left: 3px solid var(--warning);
+  border-radius: 8px;
+  background: var(--warning-soft);
+}
+
+.inbox__review p {
+  margin: 0.25rem 0 0.6rem;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 900px) {
+  .fleetgrid__header {
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .fleetstats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0.5rem;
+    overflow: visible;
+  }
+
+  .fleetstats > span {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+
+  .fleetfilters {
+    gap: 0.4rem;
+    padding: 0.5rem;
   }
 }

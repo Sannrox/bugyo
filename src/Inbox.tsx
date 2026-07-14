@@ -2,9 +2,9 @@ import { useState } from "react";
 import { GitBranch, LayoutGrid, SquareTerminal } from "lucide-react";
 import { acpRespondPermission } from "./lib/ipc";
 import { useFleet } from "./lib/fleetStore";
+import { effectiveStatus, needsAttention } from "./lib/review";
 
-/** Global "needs attention" view: sessions awaiting an approval decision or in
- * an error state, with inline approve/deny — so a paused agent never hides. */
+/** Global owner-action view: approvals, failures, and workspaces awaiting review. */
 export default function Inbox() {
   const sessions = useFleet((s) => s.sessions);
   const order = useFleet((s) => s.order);
@@ -15,11 +15,7 @@ export default function Inbox() {
 
   const items = order
     .map((id) => sessions[id])
-    .filter(
-      (s) =>
-        !!s &&
-        (s.state.status === "needsApproval" || s.state.status === "error"),
-    );
+    .filter((s) => !!s && needsAttention(s.state.status, s.review));
 
   async function respond(
     sessionId: string,
@@ -66,6 +62,9 @@ export default function Inbox() {
           const responseKey = perm ? `${s.sessionId}:${perm.requestId}` : "";
           const sentOption = responding[responseKey];
           const decisionSent = Boolean(sentOption);
+          const status = effectiveStatus(s.state.status, s.review);
+          const needsReview =
+            status === "needsReview" || status === "readyToLand";
           return (
             <li key={s.sessionId} className="inbox__item">
               <button
@@ -112,6 +111,26 @@ export default function Inbox() {
                       {errors[responseKey]} — choose again to retry.
                     </p>
                   )}
+                </div>
+              ) : needsReview ? (
+                <div className="inbox__review">
+                  <strong>
+                    {status === "readyToLand"
+                      ? "Ready to land"
+                      : "Review changes"}
+                  </strong>
+                  <p>
+                    {status === "readyToLand"
+                      ? "Verification passed. Review the result and choose whether to land it."
+                      : "The workspace has changes waiting for your review."}
+                  </p>
+                  <button
+                    type="button"
+                    className="pane__action"
+                    onClick={() => setActive(s.sessionId)}
+                  >
+                    Open review
+                  </button>
                 </div>
               ) : (
                 <div className="inbox__error" role="alert">

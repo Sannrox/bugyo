@@ -565,11 +565,19 @@ function TriggerForm({
       <div className="automations__formhead">
         <div>
           <strong>{initial ? "Edit trigger" : "Create trigger"}</strong>
-          <p>Define what to watch, then what happens when new items appear.</p>
         </div>
-        <button type="button" className="pane__action" onClick={onCancel}>
-          Cancel
-        </button>
+        <div className="automations__formhead-actions">
+          <button
+            type="submit"
+            className="composer__send"
+            disabled={busy || !canSubmit}
+          >
+            {busy ? "…" : initial ? "Save" : "Create"}
+          </button>
+          <button type="button" className="pane__action" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
       </div>
 
       <label className="automations__field">
@@ -897,16 +905,6 @@ function TriggerForm({
           Choose a valid action before saving this trigger.
         </p>
       )}
-
-      <div className="automations__formactions">
-        <button
-          type="submit"
-          className="composer__send"
-          disabled={busy || !canSubmit}
-        >
-          {busy ? "…" : initial ? "Save" : "Create"}
-        </button>
-      </div>
     </form>
   );
 }

@@ -35,3 +35,17 @@ export function effectiveStatus(
       return agent;
   }
 }
+
+/** Statuses that require an explicit owner decision or follow-up. */
+export function needsAttention(
+  agent: SessionState["status"],
+  review: WorkspaceReviewState | null,
+): boolean {
+  const status = effectiveStatus(agent, review);
+  return (
+    status === "needsApproval" ||
+    status === "error" ||
+    status === "needsReview" ||
+    status === "readyToLand"
+  );
+}
