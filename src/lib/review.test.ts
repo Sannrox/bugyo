@@ -9,6 +9,7 @@ function review(stage: ReviewStage): WorkspaceReviewState {
     hasUncommittedChanges: false,
     changedFiles: [],
     lastCheck: null,
+    checkCurrent: false,
   };
 }
 

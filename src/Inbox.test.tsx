@@ -61,6 +61,7 @@ describe("Attention inbox", () => {
         hasUncommittedChanges: false,
         changedFiles: ["src/Inbox.tsx"],
         lastCheck: null,
+        checkCurrent: false,
       },
     });
 

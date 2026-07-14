@@ -88,6 +88,7 @@ describe("FleetGrid", () => {
         hasUncommittedChanges: false,
         changedFiles: ["src/main.rs"],
         lastCheck: null,
+        checkCurrent: false,
       },
     });
 
@@ -111,6 +112,7 @@ describe("FleetGrid", () => {
         hasUncommittedChanges: false,
         changedFiles: ["billing.ts"],
         lastCheck: null,
+        checkCurrent: false,
       },
     });
 

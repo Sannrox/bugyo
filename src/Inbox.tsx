@@ -121,7 +121,7 @@ export default function Inbox() {
                   </strong>
                   <p>
                     {status === "readyToLand"
-                      ? "Verification passed. Review the result and choose whether to land it."
+                      ? "Changes are committed. Review the result and choose whether to land it."
                       : "The workspace has changes waiting for your review."}
                   </p>
                   <button

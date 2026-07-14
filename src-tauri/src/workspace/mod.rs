@@ -10,7 +10,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Errors from workspace/git operations.
 #[derive(Debug, thiserror::Error)]
@@ -262,10 +262,41 @@ pub struct ReviewCheck {
 /// Durable landing outcome for a workspace. kiro's flow is git-only: the agent
 /// commits its reviewed work and the human pushes the branch to `origin`. There
 /// is no local merge or hosted pull/merge request (no `gh`/`glab`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum LandingState {
     Pushed,
+    /// Migrated outcome from the former hosted-PR workflow.
+    LegacyPullRequest,
+    /// Migrated outcome from the former local-merge workflow.
+    Landed,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum PersistedLandingState {
+    Pushed,
+    LegacyPullRequest,
+    Landed,
+    PullRequest { url: String },
+    Merged,
+}
+
+impl<'de> Deserialize<'de> for LandingState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match PersistedLandingState::deserialize(deserializer)? {
+            PersistedLandingState::Pushed => Ok(Self::Pushed),
+            PersistedLandingState::LegacyPullRequest => Ok(Self::LegacyPullRequest),
+            PersistedLandingState::Landed | PersistedLandingState::Merged => Ok(Self::Landed),
+            PersistedLandingState::PullRequest { url } => {
+                let _ = url;
+                Ok(Self::LegacyPullRequest)
+            }
+        }
+    }
 }
 
 /// Review metadata persisted with the session descriptor.
@@ -299,6 +330,7 @@ pub struct ReviewState {
     pub has_uncommitted_changes: bool,
     pub changed_files: Vec<String>,
     pub last_check: Option<ReviewCheck>,
+    pub check_current: bool,
 }
 
 fn untracked_files(worktree_path: &Path) -> Result<Vec<String>, WorkspaceError> {
@@ -370,6 +402,17 @@ fn head_matches_upstream(worktree_path: &Path) -> bool {
     head == upstream
 }
 
+fn head_matches_origin_branch(worktree_path: &Path, branch: &str) -> bool {
+    let Ok(head) = run_git(worktree_path, &["rev-parse", "HEAD"]) else {
+        return false;
+    };
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let Ok(remote_head) = run_git(worktree_path, &["rev-parse", &remote_ref]) else {
+        return false;
+    };
+    head == remote_head
+}
+
 /// Stage and commit every reviewed workspace change with an explicit message.
 pub fn commit_all(worktree_path: &Path, message: &str) -> Result<(), WorkspaceError> {
     if message.trim().is_empty() {
@@ -403,6 +446,11 @@ pub fn review_state(
     let changed_files: Vec<String> = files.into_iter().collect();
     let has_changes = !changed_files.is_empty();
     let has_uncommitted_changes = !status_lines.is_empty();
+    let check_current = match &record.last_check {
+        Some(check) => change_fingerprint(workspace)
+            .is_ok_and(|fingerprint| check.change_fingerprint == fingerprint),
+        None => false,
+    };
 
     // Landing readiness is a function of commit state, not verification. The
     // agent is responsible for verifying its own work (via its own tools or a
@@ -417,6 +465,16 @@ pub fn review_state(
         // A push only remains current while the local branch still points at
         // the upstream commit updated by `git push -u`.
         Some(LandingState::Pushed) if head_matches_upstream(root) => ReviewStage::Pushed,
+        Some(LandingState::LegacyPullRequest)
+            if !has_changes
+                || head_matches_upstream(root)
+                || head_matches_origin_branch(root, &workspace.branch) =>
+        {
+            ReviewStage::Pushed
+        }
+        // Legacy PR/merge outcomes are final even though those branches may
+        // never have tracked an upstream under the old landing workflow.
+        Some(LandingState::Landed) if !has_uncommitted_changes => ReviewStage::Pushed,
         // Committed changes on a clean worktree: ready for a human to land.
         _ => ReviewStage::ReadyToLand,
     };
@@ -427,6 +485,7 @@ pub fn review_state(
         has_uncommitted_changes,
         changed_files,
         last_check: record.last_check.clone(),
+        check_current,
     })
 }
 
@@ -631,6 +690,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_landing_records_deserialize_without_losing_check_history() {
+        for (landing, expected) in [
+            (
+                r#"{"type":"pullRequest","url":"https://example.test/pr/1"}"#,
+                LandingState::LegacyPullRequest,
+            ),
+            (r#"{"type":"merged"}"#, LandingState::Landed),
+        ] {
+            let json = format!(
+                r#"{{"lastCheck":{{"script":"cargo test","success":true,"exitCode":0,"completedAt":"now","changeFingerprint":"abc"}},"landing":{landing}}}"#
+            );
+            let record: ReviewRecord = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(record.landing, Some(expected));
+            assert_eq!(record.last_check.unwrap().script, "cargo test");
+        }
+
+        for landing in [LandingState::LegacyPullRequest, LandingState::Landed] {
+            let migrated = ReviewRecord {
+                landing: Some(landing),
+                ..ReviewRecord::default()
+            };
+            let json = serde_json::to_string(&migrated).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ReviewRecord>(&json).unwrap(),
+                migrated
+            );
+        }
+    }
+
+    #[test]
     fn create_makes_isolated_worktree_and_branch() {
         let tmp = Tmp::new("create");
         let repo = tmp.path().join("repo");
@@ -659,6 +749,12 @@ mod tests {
             review_state(&workspace, &record).unwrap().stage,
             ReviewStage::Active
         );
+        record.landing = Some(LandingState::LegacyPullRequest);
+        assert_eq!(
+            review_state(&workspace, &record).unwrap().stage,
+            ReviewStage::Pushed
+        );
+        record.landing = None;
 
         // Uncommitted changes must be committed before a human can land them.
         let changed = Path::new(&workspace.worktree_path).join("review.txt");

@@ -4022,12 +4022,12 @@ button:active:not(:disabled) {
 }
 
 .search__form button,
-.fleetgrid__new,
 .automations__head > button {
   min-height: 38px;
   border: 1px solid #dcdde0;
   border-radius: 9px;
   background: #f7f7f8;
+  color: var(--text);
   box-shadow: none;
 }
 
@@ -5346,9 +5346,15 @@ button[aria-label],
 
 /* Compact desktop windows are a primary Bugyo use case. Keep owner actions and
    fleet state visible without spending the first viewport on summary chrome. */
-.fleetgrid__new {
+.fleetgrid__header > .fleetgrid__new {
+  appearance: none;
+  -webkit-appearance: none;
   flex: none;
   white-space: nowrap;
+  border: 1px solid #202124;
+  background-color: #202124;
+  color: #fff;
+  opacity: 1;
 }
 
 .automations__formhead {
